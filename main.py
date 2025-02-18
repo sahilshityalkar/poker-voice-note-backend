@@ -10,8 +10,8 @@ import hashlib
 from datetime import datetime, timedelta
 import asyncio
 from audio_api import router as audio_router  # Import the audio router
-from register import router as register_router
-from login import router as login_router
+from auth.register import router as register_router
+from auth.login import router as login_router
 
 # Load environment variables
 load_dotenv()
