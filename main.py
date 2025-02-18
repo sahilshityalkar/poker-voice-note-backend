@@ -10,6 +10,8 @@ import hashlib
 from datetime import datetime, timedelta
 import asyncio
 from audio_api import router as audio_router  # Import the audio router
+from register import router as register_router
+from login import router as login_router
 
 # Load environment variables
 load_dotenv()
@@ -28,6 +30,8 @@ app.add_middleware(
 
 # Include the audio router
 app.include_router(audio_router, prefix="/audio", tags=["Audio"])
+app.include_router(register_router, prefix="/auth", tags=["Authentication"])
+app.include_router(login_router, prefix="/auth", tags=["Authentication"])
 
 # Initialize OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))

@@ -6,3 +6,7 @@ aiofiles
 python-multipart
 deepgram-sdk
 requests
+pyjwt
+passlib[bcrypt]
+motor
+email-validator
