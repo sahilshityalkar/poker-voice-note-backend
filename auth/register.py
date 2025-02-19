@@ -1,13 +1,14 @@
 # register.py
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, UUID4
 from typing import Optional
 from datetime import datetime, timedelta
 import jwt
-from passlib.context import CryptContext
+# from passlib.context import CryptContext  # Remove passlib import
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 from dotenv import load_dotenv
+import uuid
 
 # Load environment variables
 load_dotenv()
@@ -27,7 +28,7 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 # Password Hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto") # Remove password context
 
 # Pydantic Models
 class UserCreate(BaseModel):
@@ -36,6 +37,7 @@ class UserCreate(BaseModel):
     password: str = Field(..., min_length=6)
 
 class UserResponse(BaseModel):
+    user_id: UUID4
     username: str
     email: str
 
@@ -43,6 +45,7 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str
     username: str
+    user_id: UUID4  # Include user_id in the response
 
 def create_access_token(data: dict):
     to_encode = data.copy()
@@ -68,13 +71,17 @@ async def register_user(user: UserCreate):
         )
     
     # Hash the password
-    hashed_password = pwd_context.hash(user.password)
+    # hashed_password = pwd_context.hash(user.password)  # Remove hashing
+    
+    # Generate a UUID for the user
+    user_id = uuid.uuid4()
     
     # Create user document
     user_doc = {
+        "user_id": str(user_id),  # Store user_id as a string
         "username": user.username,
         "email": user.email,
-        "hashed_password": hashed_password,
+        "password": user.password,  # Store password as is
         "created_at": datetime.utcnow()
     }
     
@@ -89,11 +96,12 @@ async def register_user(user: UserCreate):
     
     # Create access token
     access_token = create_access_token(
-        data={"sub": user.username}
+        data={"sub": user.username, "user_id": str(user_id)}
     )
     
     return TokenResponse(
         access_token=access_token,
         token_type="bearer",
-        username=user.username
+        username=user.username,
+        user_id=user_id
     )
