@@ -5,6 +5,12 @@ import os
 from datetime import datetime
 from pathlib import Path
 import uuid
+import aiohttp
+from motor.motor_asyncio import AsyncIOMotorClient
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 router = APIRouter()
 
@@ -22,6 +28,16 @@ try:
 except Exception as e:
     print(f"Error creating directory: {e}")
 
+# Deepgram setup
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
+DEEPGRAM_URL = "https://api.deepgram.com/v1/listen"
+
+# MongoDB setup
+MONGODB_URL = os.getenv("DATABASE_URL")
+client = AsyncIOMotorClient(MONGODB_URL)
+db = client.pokernotes
+transcripts_collection = db.transcripts
+
 ALLOWED_AUDIO_TYPES = {
     "audio/mpeg": ".mp3",
     "audio/wav": ".wav",
@@ -29,6 +45,51 @@ ALLOWED_AUDIO_TYPES = {
     "audio/x-m4a": ".m4a"
 }
 
+async def transcribe_audio_file(file_path: Path, content_type: str, room_id: str, user_id: str):
+    """Transcribe audio file using Deepgram"""
+    try:
+        # Read the audio file
+        with open(file_path, 'rb') as audio_file:
+            audio_content = audio_file.read()
+
+        # Headers for Deepgram
+        headers = {
+            "Authorization": f"Token {DEEPGRAM_API_KEY}",
+            "Content-Type": content_type
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                DEEPGRAM_URL,
+                data=audio_content,
+                headers=headers,
+                timeout=180
+            ) as response:
+                result = await response.json()
+                
+                if response.status == 200 and 'results' in result:
+                    transcript = result['results']['channels'][0]['alternatives'][0]['transcript']
+                    confidence = result['results']['channels'][0]['alternatives'][0].get('confidence', 0)
+                    
+                    # Save to MongoDB if we got a transcript
+                    if transcript:
+                        transcript_doc = {
+                            "transcript_id": str(uuid.uuid4()),
+                            "filename": file_path.name,
+                            "created_at": datetime.utcnow(),
+                            "transcript": transcript,
+                            "room_id": room_id,
+                            "user_id": user_id
+                        }
+                        
+                        await transcripts_collection.insert_one(transcript_doc)
+                        return transcript, confidence
+                
+                return None, 0
+
+    except Exception as e:
+        print(f"Error during transcription: {str(e)}")
+        return None, 0
 
 @router.post("/upload/")
 async def upload_audio(
@@ -41,32 +102,15 @@ async def upload_audio(
     try:
         # Verify that the Header parameters are defined.
         if not room_id:
-            raise HTTPException(
-                status_code=400, detail="Room ID is required in the header"
-            )
+            raise HTTPException(status_code=400, detail="Room ID is required in the header")
         if not user_id:
-            raise HTTPException(
-                status_code=400, detail="User ID is required in the header"
-            )
-        # Debug prints
-        print(f"Starting file upload process...")
-        print(f"Current working directory: {os.getcwd()}")
-        print(f"Upload directory: {UPLOAD_DIR}")
-        print(f"Received file: {file.filename}")
-        print(f"File content type: {file.content_type}")
-        print(f"Room ID from header: {room_id}")
-        print(f"User ID from header: {user_id}")
-
-        # Check if upload directory exists
-        if not UPLOAD_DIR.exists():
-            print("Upload directory doesn't exist, creating it...")
-            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            raise HTTPException(status_code=400, detail="User ID is required in the header")
 
         # Validate file content type
         if file.content_type not in ALLOWED_AUDIO_TYPES:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid file type. Allowed types are: {', '.join(ALLOWED_AUDIO_TYPES.keys())}",
+                detail=f"Invalid file type. Allowed types are: {', '.join(ALLOWED_AUDIO_TYPES.keys())}"
             )
 
         # Generate unique filename with timestamp
@@ -76,35 +120,37 @@ async def upload_audio(
         new_filename = f"{timestamp}_{original_filename}"
         file_path = UPLOAD_DIR / new_filename
 
-        print(f"Attempting to save file to: {file_path}")
-
         # Save the file
         try:
             with open(file_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
-            print(f"File saved successfully at: {file_path}")
         except Exception as save_error:
             print(f"Error saving file: {save_error}")
-            raise HTTPException(
-                status_code=500, detail=f"Failed to save file: {str(save_error)}"
-            )
+            raise HTTPException(status_code=500, detail=f"Failed to save file: {str(save_error)}")
 
         # Verify file was saved
-        if file_path.exists():
-            file_size = os.path.getsize(file_path)
-            print(f"File verification successful. Size: {file_size} bytes")
-        else:
-            raise HTTPException(
-                status_code=500, detail="File was not saved successfully"
-            )
+        if not file_path.exists():
+            raise HTTPException(status_code=500, detail="File was not saved successfully")
+
+        file_size = os.path.getsize(file_path)
+
+        # Transcribe the audio file
+        transcript, confidence = await transcribe_audio_file(
+            file_path=file_path,
+            content_type=file.content_type,
+            room_id=room_id,
+            user_id=user_id
+        )
 
         return {
             "success": True,
             "filename": new_filename,
             "file_size": file_size,
             "file_path": str(file_path),
-            "room_id": room_id,  # Include room_id in response
-            "user_id": user_id,  # Include user_id in response
+            "room_id": room_id,
+            "user_id": user_id,
+            "transcript": transcript,
+            "confidence": confidence
         }
 
     except HTTPException as he:
@@ -116,20 +162,14 @@ async def upload_audio(
             Path(file_path).unlink()
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get("/files/")
 async def list_audio_files(room_id: str = Header(None), user_id: str = Header(None)):
     """Endpoint to list all uploaded audio files filtered by room_id and user_id"""
     try:
-        # Required Headers Checks
         if not room_id:
-            raise HTTPException(
-                status_code=400, detail="Room ID is required in the header"
-            )
+            raise HTTPException(status_code=400, detail="Room ID is required in the header")
         if not user_id:
-            raise HTTPException(
-                status_code=400, detail="User ID is required in the header"
-            )
+            raise HTTPException(status_code=400, detail="User ID is required in the header")
 
         if not UPLOAD_DIR.exists():
             return {"success": True, "files": [], "total_files": 0}
@@ -137,34 +177,50 @@ async def list_audio_files(room_id: str = Header(None), user_id: str = Header(No
         files = []
         for file_path in UPLOAD_DIR.glob("*"):
             if file_path.suffix in ALLOWED_AUDIO_TYPES.values():
-                # Extract file information from filename
                 filename = file_path.name
                 file_size = os.path.getsize(file_path)
+                
+                # Get transcript from MongoDB
+                transcript_doc = await transcripts_collection.find_one({
+                    "filename": filename,
+                    "room_id": room_id,
+                    "user_id": user_id
+                })
+                
                 file_data = {
                     "filename": filename,
                     "file_size": file_size,
                     "file_path": str(file_path),
                     "room_id": room_id,
                     "user_id": user_id,
+                    "transcript": transcript_doc["transcript"] if transcript_doc else None
                 }
                 files.append(file_data)
 
         return {"success": True, "files": files, "total_files": len(files)}
+        
     except Exception as e:
         print(f"Error listing files: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.delete("/files/{filename}")
 async def delete_audio_file(filename: str):
-    """Endpoint to delete a specific audio file"""
+    """Endpoint to delete a specific audio file and its transcript"""
     try:
         file_path = UPLOAD_DIR / filename
         if not file_path.exists():
             raise HTTPException(status_code=404, detail=f"File {filename} not found")
 
+        # Delete the file
         os.remove(file_path)
-        return {"success": True, "message": f"File {filename} successfully deleted"}
+        
+        # Delete associated transcript
+        await transcripts_collection.delete_one({"filename": filename})
+        
+        return {
+            "success": True,
+            "message": f"File {filename} and its transcript successfully deleted"
+        }
     except Exception as e:
         print(f"Error deleting file: {e}")
         raise HTTPException(status_code=500, detail=str(e))
