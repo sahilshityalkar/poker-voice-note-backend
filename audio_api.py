@@ -1,10 +1,10 @@
-# audio_api.py
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Header
 from typing import Optional
 import shutil
 import os
 from datetime import datetime
 from pathlib import Path
+import uuid
 
 router = APIRouter()
 
@@ -29,19 +29,33 @@ ALLOWED_AUDIO_TYPES = {
     "audio/x-m4a": ".m4a"
 }
 
+
 @router.post("/upload/")
 async def upload_audio(
     file: UploadFile = File(...),
-    description: Optional[str] = None
+    room_id: str = Header(None),
+    user_id: str = Header(None),
+    description: Optional[str] = None,
 ):
-    """Endpoint to upload audio files"""
+    """Endpoint to upload audio files with room_id and user_id"""
     try:
+        # Verify that the Header parameters are defined.
+        if not room_id:
+            raise HTTPException(
+                status_code=400, detail="Room ID is required in the header"
+            )
+        if not user_id:
+            raise HTTPException(
+                status_code=400, detail="User ID is required in the header"
+            )
         # Debug prints
         print(f"Starting file upload process...")
         print(f"Current working directory: {os.getcwd()}")
         print(f"Upload directory: {UPLOAD_DIR}")
         print(f"Received file: {file.filename}")
         print(f"File content type: {file.content_type}")
+        print(f"Room ID from header: {room_id}")
+        print(f"User ID from header: {user_id}")
 
         # Check if upload directory exists
         if not UPLOAD_DIR.exists():
@@ -52,7 +66,7 @@ async def upload_audio(
         if file.content_type not in ALLOWED_AUDIO_TYPES:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid file type. Allowed types are: {', '.join(ALLOWED_AUDIO_TYPES.keys())}"
+                detail=f"Invalid file type. Allowed types are: {', '.join(ALLOWED_AUDIO_TYPES.keys())}",
             )
 
         # Generate unique filename with timestamp
@@ -72,8 +86,7 @@ async def upload_audio(
         except Exception as save_error:
             print(f"Error saving file: {save_error}")
             raise HTTPException(
-                status_code=500,
-                detail=f"Failed to save file: {str(save_error)}"
+                status_code=500, detail=f"Failed to save file: {str(save_error)}"
             )
 
         # Verify file was saved
@@ -82,15 +95,16 @@ async def upload_audio(
             print(f"File verification successful. Size: {file_size} bytes")
         else:
             raise HTTPException(
-                status_code=500,
-                detail="File was not saved successfully"
+                status_code=500, detail="File was not saved successfully"
             )
 
         return {
             "success": True,
             "filename": new_filename,
             "file_size": file_size,
-            "file_path": str(file_path)
+            "file_path": str(file_path),
+            "room_id": room_id,  # Include room_id in response
+            "user_id": user_id,  # Include user_id in response
         }
 
     except HTTPException as he:
@@ -98,37 +112,48 @@ async def upload_audio(
     except Exception as e:
         print(f"Unexpected error during upload: {str(e)}")
         # Clean up if file was partially uploaded
-        if 'file_path' in locals() and Path(file_path).exists():
+        if "file_path" in locals() and Path(file_path).exists():
             Path(file_path).unlink()
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.get("/files/")
-async def list_audio_files():
-    """Endpoint to list all uploaded audio files"""
+async def list_audio_files(room_id: str = Header(None), user_id: str = Header(None)):
+    """Endpoint to list all uploaded audio files filtered by room_id and user_id"""
     try:
+        # Required Headers Checks
+        if not room_id:
+            raise HTTPException(
+                status_code=400, detail="Room ID is required in the header"
+            )
+        if not user_id:
+            raise HTTPException(
+                status_code=400, detail="User ID is required in the header"
+            )
+
         if not UPLOAD_DIR.exists():
-            return {
-                "success": True,
-                "files": [],
-                "total_files": 0
-            }
+            return {"success": True, "files": [], "total_files": 0}
 
         files = []
         for file_path in UPLOAD_DIR.glob("*"):
             if file_path.suffix in ALLOWED_AUDIO_TYPES.values():
-                files.append({
-                    "filename": file_path.name,
-                    "file_size": os.path.getsize(file_path),
-                    "file_path": str(file_path)
-                })
-        return {
-            "success": True,
-            "files": files,
-            "total_files": len(files)
-        }
+                # Extract file information from filename
+                filename = file_path.name
+                file_size = os.path.getsize(file_path)
+                file_data = {
+                    "filename": filename,
+                    "file_size": file_size,
+                    "file_path": str(file_path),
+                    "room_id": room_id,
+                    "user_id": user_id,
+                }
+                files.append(file_data)
+
+        return {"success": True, "files": files, "total_files": len(files)}
     except Exception as e:
         print(f"Error listing files: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.delete("/files/{filename}")
 async def delete_audio_file(filename: str):
@@ -136,16 +161,10 @@ async def delete_audio_file(filename: str):
     try:
         file_path = UPLOAD_DIR / filename
         if not file_path.exists():
-            raise HTTPException(
-                status_code=404,
-                detail=f"File {filename} not found"
-            )
-        
+            raise HTTPException(status_code=404, detail=f"File {filename} not found")
+
         os.remove(file_path)
-        return {
-            "success": True,
-            "message": f"File {filename} successfully deleted"
-        }
+        return {"success": True, "message": f"File {filename} successfully deleted"}
     except Exception as e:
         print(f"Error deleting file: {e}")
         raise HTTPException(status_code=500, detail=str(e))
