@@ -12,6 +12,7 @@ import asyncio
 from audio_api import router as audio_router  # Import the audio router
 from auth.register import router as register_router
 from auth.login import router as login_router
+from room.room import router as room_router
 
 # Load environment variables
 load_dotenv()
@@ -32,6 +33,7 @@ app.add_middleware(
 app.include_router(audio_router, prefix="/audio", tags=["Audio"])
 app.include_router(register_router, prefix="/auth", tags=["Authentication"])
 app.include_router(login_router, prefix="/auth", tags=["Authentication"])
+app.include_router(room_router, prefix="/room", tags=["Room"])
 
 # Initialize OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
