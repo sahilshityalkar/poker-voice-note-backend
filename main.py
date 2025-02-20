@@ -14,7 +14,7 @@ from auth.register import router as register_router
 from auth.login import router as login_router
 # from deepgramsetup.deepgram_try import router as deepgram_router
 from audio_processing.get_all_transcript_data import router as transcript_router
-from profile_api import router as profile_router
+from profile_apis.profile_api import router as profile_router
 
 # Load environment variables
 load_dotenv()
