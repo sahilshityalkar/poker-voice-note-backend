@@ -8,6 +8,12 @@ import uuid
 import aiohttp
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
+from typing import Any, Dict
+import asyncio
+
+# Import the GPT analysis functions
+# NO DOT NEEDED ANYMORE
+from gpt_analysis import generate_summary, generate_insight
 
 # Load environment variables
 load_dotenv()
@@ -78,10 +84,17 @@ async def transcribe_audio_file(file_path: Path, content_type: str, user_id: str
                             "filename": file_path.name,
                             "created_at": datetime.utcnow(),
                             "transcript": transcript,
-                            "user_id": user_id
+                            "user_id": user_id,
+                            "summary": None,  # Add summary field initialized to None
+                            "insight": None   # Add insight field initialized to None
                         }
                         
                         await transcripts_collection.insert_one(transcript_doc)
+
+                        # Asynchronously generate summary and update the document
+                        asyncio.create_task(update_transcript_with_analysis(transcript_doc["transcript_id"], transcript)) # Pass the document id
+
+
                         return transcript, confidence
                 
                 return None, 0
@@ -89,6 +102,21 @@ async def transcribe_audio_file(file_path: Path, content_type: str, user_id: str
     except Exception as e:
         print(f"Error during transcription: {str(e)}")
         return None, 0
+
+async def update_transcript_with_analysis(transcript_id: str, transcript: str):
+    """Updates the transcript document with the generated summary and insight."""
+    try:
+        summary = await generate_summary(transcript)
+        #insight = await generate_insight(transcript)
+
+        await transcripts_collection.update_one(
+            {"transcript_id": transcript_id},
+            {"$set": {"summary": summary}} #, "insight": insight}}
+        )
+        print(f"Transcript {transcript_id} updated with summary and insight.")
+
+    except Exception as e:
+        print(f"Error updating transcript with analysis: {e}")
 
 @router.post("/upload/")
 async def upload_audio(
@@ -182,7 +210,9 @@ async def list_audio_files(user_id: str = Header(None)):
                     "file_size": file_size,
                     "file_path": str(file_path),
                     "user_id": user_id,
-                    "transcript": transcript_doc["transcript"] if transcript_doc else None
+                    "transcript": transcript_doc["transcript"] if transcript_doc else None,
+                    "summary": transcript_doc.get("summary"),   # Retrieve summary
+                    "insight": transcript_doc.get("insight")     # Retrieve insight
                 }
                 files.append(file_data)
 

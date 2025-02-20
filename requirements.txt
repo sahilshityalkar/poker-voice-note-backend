@@ -3,6 +3,7 @@ uvicorn
 python-dotenv
 openai
 aiofiles
+aiohttp
 python-multipart
 deepgram-sdk
 requests
