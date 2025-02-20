@@ -13,6 +13,8 @@ from audio_api import router as audio_router  # Import the audio router
 from auth.register import router as register_router
 from auth.login import router as login_router
 # from deepgramsetup.deepgram_try import router as deepgram_router
+from get_all_transcript_data import router as transcript_router
+from profile_api import router as profile_router
 
 # Load environment variables
 load_dotenv()
@@ -34,6 +36,8 @@ app.include_router(audio_router, prefix="/audio", tags=["Audio"])
 app.include_router(register_router, prefix="/auth", tags=["Authentication"])
 app.include_router(login_router, prefix="/auth", tags=["Authentication"])
 # app.include_router(deepgram_router, prefix="/api/deepgram", tags=["deepgram"])
+app.include_router(transcript_router, prefix="/transcripts", tags=["transcripts"])
+app.include_router(profile_router, prefix="/profile", tags=["profile"])
 
 # Initialize OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))

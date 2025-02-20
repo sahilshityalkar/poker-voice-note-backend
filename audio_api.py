@@ -12,7 +12,6 @@ from typing import Any, Dict
 import asyncio
 
 # Import the GPT analysis functions
-# NO DOT NEEDED ANYMORE
 from gpt_analysis import generate_summary, generate_insight
 
 # Load environment variables
@@ -107,11 +106,11 @@ async def update_transcript_with_analysis(transcript_id: str, transcript: str):
     """Updates the transcript document with the generated summary and insight."""
     try:
         summary = await generate_summary(transcript)
-        #insight = await generate_insight(transcript)
+        insight = await generate_insight(transcript)
 
         await transcripts_collection.update_one(
             {"transcript_id": transcript_id},
-            {"$set": {"summary": summary}} #, "insight": insight}}
+            {"$set": {"summary": summary, "insight": insight}}
         )
         print(f"Transcript {transcript_id} updated with summary and insight.")
 
