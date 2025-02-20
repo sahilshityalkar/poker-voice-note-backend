@@ -20,9 +20,9 @@ load_dotenv()
 router = APIRouter()
 
 # Get the current file's directory
-CURRENT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
-# Set upload directory relative to current file
-UPLOAD_DIR = CURRENT_DIR / "uploads" / "audio"
+#CURRENT_DIR = Path(os.path.dirname(os.path.abspath(__file__))) # not needed
+# Set upload directory relative to root folder
+UPLOAD_DIR = Path(__file__).resolve().parents[1] / "uploads" / "audio" # Accessing The Parent folder
 
 print(f"Upload directory path: {UPLOAD_DIR}")
 
