@@ -3,7 +3,7 @@
 import os
 import openai
 from dotenv import load_dotenv
-from prompts import SUMMARY_PROMPT, INSIGHT_PROMPT
+from audio_processing.prompts import SUMMARY_PROMPT, INSIGHT_PROMPT
 
 load_dotenv()
 

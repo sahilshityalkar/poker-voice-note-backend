@@ -12,7 +12,7 @@ from typing import Any, Dict
 import asyncio
 
 # Import the GPT analysis functions
-from gpt_analysis import generate_summary, generate_insight
+from audio_processing.gpt_analysis import generate_summary, generate_insight
 
 # Load environment variables
 load_dotenv()
