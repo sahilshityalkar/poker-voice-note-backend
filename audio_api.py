@@ -45,7 +45,7 @@ ALLOWED_AUDIO_TYPES = {
     "audio/x-m4a": ".m4a"
 }
 
-async def transcribe_audio_file(file_path: Path, content_type: str, room_id: str, user_id: str):
+async def transcribe_audio_file(file_path: Path, content_type: str, user_id: str):
     """Transcribe audio file using Deepgram"""
     try:
         # Read the audio file
@@ -78,7 +78,6 @@ async def transcribe_audio_file(file_path: Path, content_type: str, room_id: str
                             "filename": file_path.name,
                             "created_at": datetime.utcnow(),
                             "transcript": transcript,
-                            "room_id": room_id,
                             "user_id": user_id
                         }
                         
@@ -94,15 +93,11 @@ async def transcribe_audio_file(file_path: Path, content_type: str, room_id: str
 @router.post("/upload/")
 async def upload_audio(
     file: UploadFile = File(...),
-    room_id: str = Header(None),
     user_id: str = Header(None),
-    description: Optional[str] = None,
 ):
-    """Endpoint to upload audio files with room_id and user_id"""
+    """Endpoint to upload audio files with user_id"""
     try:
         # Verify that the Header parameters are defined.
-        if not room_id:
-            raise HTTPException(status_code=400, detail="Room ID is required in the header")
         if not user_id:
             raise HTTPException(status_code=400, detail="User ID is required in the header")
 
@@ -138,7 +133,6 @@ async def upload_audio(
         transcript, confidence = await transcribe_audio_file(
             file_path=file_path,
             content_type=file.content_type,
-            room_id=room_id,
             user_id=user_id
         )
 
@@ -147,7 +141,6 @@ async def upload_audio(
             "filename": new_filename,
             "file_size": file_size,
             "file_path": str(file_path),
-            "room_id": room_id,
             "user_id": user_id,
             "transcript": transcript,
             "confidence": confidence
@@ -163,11 +156,9 @@ async def upload_audio(
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/files/")
-async def list_audio_files(room_id: str = Header(None), user_id: str = Header(None)):
-    """Endpoint to list all uploaded audio files filtered by room_id and user_id"""
+async def list_audio_files(user_id: str = Header(None)):
+    """Endpoint to list all uploaded audio files filtered by user_id"""
     try:
-        if not room_id:
-            raise HTTPException(status_code=400, detail="Room ID is required in the header")
         if not user_id:
             raise HTTPException(status_code=400, detail="User ID is required in the header")
 
@@ -183,7 +174,6 @@ async def list_audio_files(room_id: str = Header(None), user_id: str = Header(No
                 # Get transcript from MongoDB
                 transcript_doc = await transcripts_collection.find_one({
                     "filename": filename,
-                    "room_id": room_id,
                     "user_id": user_id
                 })
                 
@@ -191,7 +181,6 @@ async def list_audio_files(room_id: str = Header(None), user_id: str = Header(No
                     "filename": filename,
                     "file_size": file_size,
                     "file_path": str(file_path),
-                    "room_id": room_id,
                     "user_id": user_id,
                     "transcript": transcript_doc["transcript"] if transcript_doc else None
                 }
