@@ -17,7 +17,6 @@ client = AsyncIOMotorClient(MONGODB_URL)
 db = client.pokernotes
 transcripts_collection = db.transcripts
 
-
 @router.get("/transcript/{transcript_id}", response_model=Dict[str, Any])
 async def get_transcript_details(transcript_id: str, user_id: str = Header(None)):
     """
