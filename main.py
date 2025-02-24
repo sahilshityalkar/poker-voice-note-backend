@@ -14,7 +14,7 @@ from auth.login import router as login_router
 # from deepgramsetup.deepgram_try import router as deepgram_router
 from audio_processing.get_all_notes_data import router as transcript_router
 from profile_apis.profile_api import router as profile_router
-from audio_processing.get_note_details import router as transcript_details_router
+# from audio_processing.get_note_details import router as transcript_details_router
 from players_apis.players_api import router as players_router
 from hands_apis.hand_api import router as hands_router
 from players_apis.get_all_notes_hands import router as player_hands_notes_router
@@ -37,11 +37,11 @@ app.add_middleware(
 
 # Include the audio router
 app.include_router(audio_router, prefix="/audio", tags=["Audio"])
-app.include_router(login_router, prefix="/auth", tags=["authentication"])
+app.include_router(login_router, prefix="/auth", tags=["Authentication"])
 # app.include_router(deepgram_router, prefix="/api/deepgram", tags=["deepgram"])
-app.include_router(transcript_router, prefix="/transcripts", tags=["transcripts"])
+app.include_router(transcript_router, prefix="/transcripts", tags=["Notes"])
+# app.include_router(transcript_details_router, prefix="/transcript", tags=["Notes"])
 app.include_router(profile_router, prefix="/profile", tags=["profile"])
-app.include_router(transcript_details_router, prefix="/transcript", tags=["transcripts"])
 app.include_router(players_router, prefix="/players", tags=["players"])
 app.include_router(hands_router, prefix="/hands", tags=["hands"])
 app.include_router(

@@ -1,11 +1,10 @@
-# get_note_details.py
-
 from fastapi import APIRouter, HTTPException, Header
-from typing import Dict, Any
+from typing import Dict, Any, List
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 from bson import ObjectId
 import os
+from datetime import datetime
 
 # Load environment variables
 load_dotenv()
@@ -21,6 +20,14 @@ db = client.pokernotes
 notes_collection = db.notes
 hands_collection = db.hands
 players_collection = db.players
+
+def serialize_object_id(obj):
+    """Helper function to serialize ObjectId to string."""
+    if isinstance(obj, ObjectId):
+        return str(obj)
+    if isinstance(obj, datetime):
+        return obj.isoformat()  # Convert datetime objects to ISO format
+    return obj
 
 @router.get("/note/{note_id}", response_model=Dict[str, Any])
 async def get_note_details(note_id: str, user_id: str = Header(None)):
@@ -149,6 +156,8 @@ async def get_note_details(note_id: str, user_id: str = Header(None)):
 
         # Execute the aggregation
         async for note in notes_collection.aggregate(pipeline):
+            # Serialize ObjectIds to strings after fetching from MongoDB
+            note = {k: serialize_object_id(v) for k, v in note.items()}
             return note
 
         # If no note found
@@ -160,37 +169,26 @@ async def get_note_details(note_id: str, user_id: str = Header(None)):
         print(f"Error retrieving note details: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/note/{note_id}/hand", response_model=Dict[str, Any])
-async def get_note_hand_details(note_id: str, user_id: str = Header(None)):
-    """Get only the hand details for a specific note"""
+@router.get("/notes", response_model=List[Dict[str, Any]])
+async def get_all_notes_by_user(user_id: str = Header(None)):
+    """
+    Get all notes associated with a specific user ID.
+    Returns a list of note objects.
+    """
     try:
         if not user_id:
             raise HTTPException(status_code=400, detail="User ID is required in the header")
 
-        note = await notes_collection.find_one({
-            "_id": ObjectId(note_id),
-            "user_id": user_id
-        })
+        notes = []
+        async for note in notes_collection.find({"user_id": user_id}):
+            # Serialize ObjectIds to strings
+            note = {k: serialize_object_id(v) for k, v in note.items()}
+            notes.append(note)
 
-        if not note:
-            raise HTTPException(status_code=404, detail="Note not found")
-
-        hand = await hands_collection.find_one({"_id": note["handId"]})
-        
-        if not hand:
-            raise HTTPException(status_code=404, detail="Hand data not found")
-
-        # Convert ObjectIds to strings
-        hand["_id"] = str(hand["_id"])
-        hand["players"] = [{
-            **player,
-            "playerId": str(player["playerId"])
-        } for player in hand["players"]]
-
-        return hand
+        return notes
 
     except HTTPException as he:
         raise he
     except Exception as e:
-        print(f"Error retrieving hand details: {e}")
+        print(f"Error retrieving notes: {e}")
         raise HTTPException(status_code=500, detail=str(e))
