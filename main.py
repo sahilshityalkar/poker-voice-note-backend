@@ -17,7 +17,7 @@ from profile_apis.profile_api import router as profile_router
 from audio_processing.get_note_details import router as transcript_details_router
 from players_apis.players_api import router as players_router
 from hands_apis.hand_api import router as hands_router
-from get_all_notes_hands import router as player_hands_notes_router
+from players_apis.get_all_notes_hands import router as player_hands_notes_router
 
 # Load environment variables
 load_dotenv()
