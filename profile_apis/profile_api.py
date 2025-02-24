@@ -138,7 +138,6 @@ async def change_phone_number(
         {
             "$set": {
                 "mobileNumber": change_request.new_mobileNumber,
-                "isVerified": False,  # You might want to set this to False
                 "updatedAt": datetime.utcnow(),
             }
         },
