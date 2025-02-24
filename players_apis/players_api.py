@@ -33,6 +33,7 @@ class HandReference(BaseModel):
         }
 
 class Player(BaseModel):
+    player_id: str = Field(..., alias="_id", description="Player ID")  # Add player_id field
     user_id: str = Field(..., description="User ID")
     name: str = Field(..., description="Player name")
     totalHands: int = Field(..., description="Total number of hands played")
@@ -45,6 +46,7 @@ class Player(BaseModel):
         json_encoders = {
             ObjectId: str  # Convert ObjectId to string
         }
+        allow_population_by_field_name = True #allows alias to work
 
 @router.get("/players/{user_id}", response_model=List[Player])
 async def get_players_by_user_id(user_id: UUID):
@@ -67,14 +69,13 @@ async def get_players_by_user_id(user_id: UUID):
             # Convert top-level ObjectId
             if "_id" in player and isinstance(player["_id"], ObjectId):
                 player["_id"] = str(player["_id"])
-            
+
             # Convert ObjectIds in handReferences
             for hand_ref in player.get("handReferences", []):
                 if "handId" in hand_ref and isinstance(hand_ref["handId"], ObjectId):
                     hand_ref["handId"] = str(hand_ref["handId"])
                 if "noteId" in hand_ref and isinstance(hand_ref["noteId"], ObjectId):
                     hand_ref["noteId"] = str(hand_ref["noteId"])
-
         return players
 
     except HTTPException:  # Re-raise HTTPExceptions (like 404)
