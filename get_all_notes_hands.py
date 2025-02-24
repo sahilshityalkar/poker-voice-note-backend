@@ -1,8 +1,3 @@
-import logging
-
-# Configure logging
-logging.basicConfig(level=logging.DEBUG)
-
 from fastapi import APIRouter, HTTPException, status
 from typing import List, Optional, Dict, Any
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -139,7 +134,6 @@ async def get_player_hands_and_notes(player_id: str):
     Retrieve all hands and notes for a specific player.
     Returns player details along with all associated hands and notes, sorted by date (newest first).
     """
-    logging.debug(f"get_player_hands_and_notes called with player_id: {player_id}")
     try:
         # Convert string player_id to ObjectId
         player_obj_id = ObjectId(player_id)
@@ -166,7 +160,6 @@ async def get_player_hands_and_notes(player_id: str):
                 note_id = hand_ref.get("noteId")
                 
                 if not hand_id or not note_id:
-                    logging.warning(f"Missing handId or noteId in handReference: {hand_ref}")
                     continue
                 
                 # Fetch hand and note from database
@@ -174,7 +167,6 @@ async def get_player_hands_and_notes(player_id: str):
                 note = await notes_collection.find_one({"_id": note_id})
                 
                 if not hand or not note:
-                    logging.warning(f"Hand {hand_id} or Note {note_id} not found")
                     continue
                 
                 # Convert ObjectIds to strings
@@ -188,8 +180,9 @@ async def get_player_hands_and_notes(player_id: str):
                 # Add to handAndNotes list
                 hands_and_notes.append(HandNotesPair(hand=hand_obj, note=note_obj))
                 
-            except Exception as e:
-                logging.exception(f"Error processing hand/note pair: {str(e)}")
+            except Exception:
+                # Skip this hand/note pair if there's an error
+                pass
         
         # Sort hands and notes by date (newest first)
         hands_and_notes.sort(key=lambda x: x.hand.date, reverse=True)
@@ -206,7 +199,6 @@ async def get_player_hands_and_notes(player_id: str):
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
-        logging.exception(f"Error in get_player_hands_and_notes: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch player data: {str(e)}"
