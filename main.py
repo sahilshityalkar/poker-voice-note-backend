@@ -17,6 +17,7 @@ from profile_apis.profile_api import router as profile_router
 from audio_processing.get_note_details import router as transcript_details_router
 from players_apis.players_api import router as players_router
 from hands_apis.hand_api import router as hands_router
+from get_all_notes_hands import router as player_hands_notes_router
 
 # Load environment variables
 load_dotenv()
@@ -42,6 +43,11 @@ app.include_router(profile_router, prefix="/profile", tags=["profile"])
 app.include_router(transcript_details_router, prefix="/transcript", tags=["transcripts"])
 app.include_router(players_router, prefix="/players", tags=["players"])
 app.include_router(hands_router, prefix="/hands", tags=["hands"])
+app.include_router(
+    player_hands_notes_router,
+    prefix="/api/v1/players",
+    tags=["PlayerHandsNotes"]
+)
 
 # Initialize OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
