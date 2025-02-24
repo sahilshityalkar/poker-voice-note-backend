@@ -13,6 +13,8 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 import re
 
+from audio_processing.gpt_analysis import clean_gpt_response
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
@@ -29,28 +31,6 @@ db = db_client.pokernotes
 players_collection = db.players
 hands_collection = db.hands
 notes_collection = db.notes
-
-def clean_gpt_response(response_text: str) -> str:
-    """
-    Clean and prepare GPT response text for JSON parsing
-    """
-    try:
-        # Basic cleaning: remove leading/trailing whitespace
-        cleaned = response_text.strip()
-
-        # Remove any text before the first '{' and after the last '}'
-        start_index = cleaned.find('{')
-        end_index = cleaned.rfind('}')
-
-        if start_index != -1 and end_index != -1:
-            cleaned = cleaned[start_index:end_index + 1]
-
-        # Validate if it's valid JSON before returning
-        json.loads(cleaned) #will raise ValueError
-        return cleaned
-    except Exception as e:
-        logging.error(f"Error cleaning GPT response: {e}")
-        return '{"strengths": [], "weaknesses": []}'  # Return valid empty JSON as fallback
 
 # Helper Function (Moved from other files)
 def convert_objectid_to_str(data):
@@ -86,6 +66,16 @@ async def analyze_player_strengths_weaknesses(
         Hand and Notes Data:
         {hand_and_notes}
 
+        Analyze the poker player from the hands provided before. The player name is "{player_data["name"]}". I need to know all the STRENGHTS and WEAKNESSES of the player.
+        Even if the player is bad, give me some positive traits that make the player unique.
+
+        If strengths are hard to identify, consider:
+          *  Positional awareness
+          *  Aggression in certain situations
+          *  Risk management
+          *  Ability to fold when necessary
+          *  Adaptability
+
         Return the output in the following JSON format:
         {{
           "strengths": [
@@ -106,7 +96,7 @@ async def analyze_player_strengths_weaknesses(
         response = await client.chat.completions.create(
             model="gpt-4",  # Or another suitable model
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3, #Adjusted, it's not so important
+            temperature=0.3,  #Adjusted, it's not so important
             max_tokens=500   # Adjust response length, adjust based on your needs
         )
 
