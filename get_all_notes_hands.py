@@ -4,7 +4,7 @@ import logging
 logging.basicConfig(level=logging.DEBUG)
 
 from fastapi import APIRouter, HTTPException, status
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 import os
@@ -43,7 +43,7 @@ class Hand(BaseModel):
     noteId: str
     myPosition: str
     iWon: bool
-    potSize: Optional[float]
+    potSize: Optional[float] = None
     date: datetime
     createdAt: datetime
     updatedAt: datetime
@@ -51,14 +51,18 @@ class Hand(BaseModel):
 
     class Config:
         allow_population_by_field_name = True
+        arbitrary_types_allowed = True
         json_encoders = {
             ObjectId: str
         }
 
 class NoteInsight(BaseModel):
-    playerTendencies: Dict[str, str]
-    keyDecisions: List[str]
-    strategicImplications: List[str]
+    playerTendencies: Dict[str, str] = {}
+    keyDecisions: List[str] = []
+    strategicImplications: List[str] = []
+
+    class Config:
+        arbitrary_types_allowed = True
 
 class Note(BaseModel):
     id: str = Field(alias="_id")
@@ -67,13 +71,14 @@ class Note(BaseModel):
     audioFileUrl: str
     transcriptFromDeepgram: str
     summaryFromGPT: str
-    insightFromGPT: NoteInsight
+    insightFromGPT: Any  # Using Any to handle different formats
     date: datetime
     createdAt: datetime
     updatedAt: datetime
 
     class Config:
         allow_population_by_field_name = True
+        arbitrary_types_allowed = True
         json_encoders = {
             ObjectId: str
         }
@@ -102,6 +107,7 @@ class Player(BaseModel):
 
     class Config:
         allow_population_by_field_name = True
+        arbitrary_types_allowed = True
         json_encoders = {
             ObjectId: str
         }
@@ -114,6 +120,19 @@ class PlayerWithHandsAndNotes(BaseModel):
     player: Player
     handAndNotes: List[HandNotesPair]
 
+def convert_objectid_to_str(data):
+    """
+    Recursively convert all ObjectId instances to strings in a dictionary or list
+    """
+    if isinstance(data, dict):
+        return {k: convert_objectid_to_str(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [convert_objectid_to_str(item) for item in data]
+    elif isinstance(data, ObjectId):
+        return str(data)
+    else:
+        return data
+
 @router.get("/{player_id}/hands-notes", response_model=PlayerWithHandsAndNotes)
 async def get_player_hands_and_notes(player_id: str):
     """
@@ -122,102 +141,73 @@ async def get_player_hands_and_notes(player_id: str):
     """
     logging.debug(f"get_player_hands_and_notes called with player_id: {player_id}")
     try:
-        # Get player
+        # Convert string player_id to ObjectId
         player_obj_id = ObjectId(player_id)
-        logging.debug(f"Attempting to find player with _id: {player_obj_id}")
         
+        # Fetch player from database
         player = await players_collection.find_one({"_id": player_obj_id})
         if not player:
-            logging.warning(f"Player with _id {player_id} not found.")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Player not found"
             )
-
-        # Convert ObjectId to string for _id field
-        player_data = dict(player)
-        player_data["_id"] = str(player_data["_id"])
-
-        # Process hand references
-        hand_references = []
+        
+        # Convert all ObjectIds to strings in player data
+        player_data = convert_objectid_to_str(player)
+        
+        # Initialize handAndNotes list
         hands_and_notes = []
         
+        # Process each hand reference
         for hand_ref in player.get("handReferences", []):
-            hand_ref_copy = dict(hand_ref)
-            
-            # Extract IDs ensuring they are in the correct format
-            hand_id = hand_ref_copy.get("handId")
-            note_id = hand_ref_copy.get("noteId")
-            
-            # Convert to string for the returned object
-            if isinstance(hand_id, ObjectId):
-                hand_ref_copy["handId"] = str(hand_id)
-            
-            if isinstance(note_id, ObjectId):
-                hand_ref_copy["noteId"] = str(note_id)
-            
-            # Create HandReference for the player model
-            hand_references.append(HandReference(**hand_ref_copy))
-            
             try:
-                # Use the ObjectId for query if it's a string
-                hand_obj_id = hand_id if isinstance(hand_id, ObjectId) else ObjectId(hand_id)
-                note_obj_id = note_id if isinstance(note_id, ObjectId) else ObjectId(note_id)
+                # Get hand and note IDs
+                hand_id = hand_ref.get("handId")
+                note_id = hand_ref.get("noteId")
                 
-                # Query the collections
-                hand = await hands_collection.find_one({"_id": hand_obj_id})
-                note = await notes_collection.find_one({"_id": note_obj_id})
+                if not hand_id or not note_id:
+                    logging.warning(f"Missing handId or noteId in handReference: {hand_ref}")
+                    continue
                 
-                if hand and note:
-                    # Convert all ObjectIds to strings in the hand document
-                    hand_data = dict(hand)
-                    hand_data["_id"] = str(hand_data["_id"])
-                    
-                    if "noteId" in hand_data and isinstance(hand_data["noteId"], ObjectId):
-                        hand_data["noteId"] = str(hand_data["noteId"])
-                    
-                    # Convert players array
-                    for player_in_hand in hand_data.get("players", []):
-                        if "playerId" in player_in_hand and isinstance(player_in_hand["playerId"], ObjectId):
-                            player_in_hand["playerId"] = str(player_in_hand["playerId"])
-                    
-                    # Convert all ObjectIds to strings in the note document
-                    note_data = dict(note)
-                    note_data["_id"] = str(note_data["_id"])
-                    
-                    if "handId" in note_data and isinstance(note_data["handId"], ObjectId):
-                        note_data["handId"] = str(note_data["handId"])
-                    
-                    # Create Hand and Note objects
-                    hand_obj = Hand(**hand_data)
-                    note_obj = Note(**note_data)
-                    
-                    # Add to our list of pairs
-                    hands_and_notes.append(HandNotesPair(hand=hand_obj, note=note_obj))
-                else:
+                # Fetch hand and note from database
+                hand = await hands_collection.find_one({"_id": hand_id})
+                note = await notes_collection.find_one({"_id": note_id})
+                
+                if not hand or not note:
                     logging.warning(f"Hand {hand_id} or Note {note_id} not found")
+                    continue
+                
+                # Convert ObjectIds to strings
+                hand_data = convert_objectid_to_str(hand)
+                note_data = convert_objectid_to_str(note)
+                
+                # Create Hand and Note objects
+                hand_obj = Hand(**hand_data)
+                note_obj = Note(**note_data)
+                
+                # Add to handAndNotes list
+                hands_and_notes.append(HandNotesPair(hand=hand_obj, note=note_obj))
+                
             except Exception as e:
-                logging.exception(f"Error processing hand {hand_id} or note {note_id}: {str(e)}")
+                logging.exception(f"Error processing hand/note pair: {str(e)}")
         
         # Sort hands and notes by date (newest first)
         hands_and_notes.sort(key=lambda x: x.hand.date, reverse=True)
         
-        # Create final player object with the processed hand references
-        player_data["handReferences"] = hand_references
+        # Create Player object
         player_obj = Player(**player_data)
         
-        # Return the final combined result
+        # Return combined result
         return PlayerWithHandsAndNotes(
             player=player_obj,
             handAndNotes=hands_and_notes
         )
         
     except HTTPException as http_exc:
-        # Re-raise HTTPExceptions
         raise http_exc
     except Exception as e:
-        logging.exception(f"General error in get_player_hands_and_notes: {str(e)}")
+        logging.exception(f"Error in get_player_hands_and_notes: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to fetch player hands and notes: {str(e)}"
+            detail=f"Failed to fetch player data: {str(e)}"
         )
