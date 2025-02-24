@@ -33,7 +33,7 @@ app.add_middleware(
 
 # Include the audio router
 app.include_router(audio_router, prefix="/audio", tags=["Audio"])
-app.include_router(login_router, prefix="/auth", tags=["Authentication"])
+app.include_router(login_router, prefix="/auth", tags=["authentication"])
 # app.include_router(deepgram_router, prefix="/api/deepgram", tags=["deepgram"])
 app.include_router(transcript_router, prefix="/transcripts", tags=["transcripts"])
 app.include_router(profile_router, prefix="/profile", tags=["profile"])
