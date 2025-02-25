@@ -1,14 +1,15 @@
 # backend/players_apis/analyze_player.py
+
 import os
 import json
 import logging
 from typing import List, Dict, Any, Optional
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
-from motor.motor_asyncio import AsyncIOMotorClient  # Import for database
+from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi import APIRouter, HTTPException, status
 from bson import ObjectId
-from uuid import UUID  # Import UUID
+from uuid import UUID
 from pydantic import BaseModel, Field
 from datetime import datetime
 import re
@@ -32,11 +33,8 @@ players_collection = db.players
 hands_collection = db.hands
 notes_collection = db.notes
 
-# Helper Function (Moved from other files)
+# Helper Function
 def convert_objectid_to_str(data):
-    """
-    Recursively convert all ObjectId instances to strings in a dictionary or list
-    """
     if isinstance(data, dict):
         return {k: convert_objectid_to_str(v) for k, v in data.items()}
     elif isinstance(data, list):
@@ -54,10 +52,21 @@ async def analyze_player_strengths_weaknesses(
     Analyzes a player's strengths and weaknesses based on structured data using GPT.
     """
     try:
+        num_hands = len(hand_and_notes)
+        num_strengths = 1 if num_hands >= 1 else 0
+        num_strengths = 2 if num_hands >= 3 else num_strengths
+        num_strengths = 3 if num_hands >= 10 else num_strengths
+        num_strengths = 4 if num_hands >= 20 else num_strengths
+
+        num_weaknesses = 1 if num_hands >= 1 else 0
+        num_weaknesses = 2 if num_hands >= 3 else num_weaknesses
+        num_weaknesses = 3 if num_hands >= 10 else num_weaknesses
+        num_weaknesses = 4 if num_hands >= 20 else num_weaknesses
+
+
         # Construct the prompt for GPT combining info from all hands
         prompt = f"""
-        You are a poker expert analyzing a player's game. Please provide a JSON object containing the player's strengths and weaknesses based on their hand history.
-        Make sure the model return valid JSON at all cost.
+        You are a world-class poker analyst. Identify {num_strengths} strengths and {num_weaknesses} weaknesses in player "{player_data["name"]}"'s game, using hand history and notes. Aim for concise descriptions.
 
         Player Name: {player_data["name"]}
         Total Hands Played: {player_data["totalHands"]}
@@ -66,38 +75,31 @@ async def analyze_player_strengths_weaknesses(
         Hand and Notes Data:
         {hand_and_notes}
 
-        Analyze the poker player from the hands provided before. The player name is "{player_data["name"]}". I need to know all the STRENGHTS and WEAKNESSES of the player.
-        Even if the player is bad, give me some positive traits that make the player unique.
+        Analyze strengths/weaknesses, even for weak players. Prioritize concise points; elaborate (max 30 words) ONLY when detail is crucial for clarity.
 
-        If strengths are hard to identify, consider:
-          *  Positional awareness
-          *  Aggression in certain situations
-          *  Risk management
-          *  Ability to fold when necessary
-          *  Adaptability
+        Consider: betting, position, hand selection, aggression, risk, tilt, note consistency, adaptability, folding.
 
-        Return the output in the following JSON format:
+        Format:
         {{
           "strengths": [
-            "Strength 1",
-            "Strength 2",
+            "Strength 1: [Concise description. Elaborate (max 30 words) if needed for clarity.]",
+            "Strength 2: [Concise description...]",
             ...
           ],
           "weaknesses": [
-            "Weakness 1",
-            "Weakness 2",
+            "Weakness 1: [Concise description. Elaborate (max 30 words) if needed for clarity.]",
+            "Weakness 2: [Concise description...]",
             ...
           ]
         }}
-
-        Ensure the response is valid JSON and nothing else.
+        Respond ONLY with valid JSON.
         """
 
         response = await client.chat.completions.create(
             model="gpt-4",  # Or another suitable model
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,  #Adjusted, it's not so important
-            max_tokens=500   # Adjust response length, adjust based on your needs
+            temperature=0.4, # Increased to allow more diverse responses
+            max_tokens=600   # Adjust response length, adjust based on your needs
         )
 
         try:
@@ -162,8 +164,14 @@ async def analyze_player(player_id: str):  # Takes *only* player_id
             try:
                 hand_id = hand_ref.get("handId")
                 note_id = hand_ref.get("noteId")
+
+                # Convert to ObjectId if they are strings, handle cases where they are already ObjectId.
+                hand_id = ObjectId(hand_id) if isinstance(hand_id, str) else hand_id
+                note_id = ObjectId(note_id) if isinstance(note_id, str) else note_id
+
                 hand = await hands_collection.find_one({"_id": hand_id})
                 note = await notes_collection.find_one({"_id": note_id})
+
                 if hand and note:
                      hand_data = convert_objectid_to_str(hand)
                      note_data = convert_objectid_to_str(note)
