@@ -1,3 +1,5 @@
+# backend/players_apis/analyze_player.py
+
 from fastapi import APIRouter, HTTPException, status
 from typing import List, Optional, Dict, Any
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -99,6 +101,8 @@ class Player(BaseModel):
     handReferences: List[HandReference]
     createdAt: datetime
     updatedAt: datetime
+    strengths: Optional[List[str]] = None
+    weaknesses: Optional[List[str]] = None
 
     class Config:
         allow_population_by_field_name = True
@@ -137,7 +141,7 @@ async def get_player_hands_and_notes(player_id: str):
     try:
         # Convert string player_id to ObjectId
         player_obj_id = ObjectId(player_id)
-        
+
         # Fetch player from database
         player = await players_collection.find_one({"_id": player_obj_id})
         if not player:
@@ -145,57 +149,57 @@ async def get_player_hands_and_notes(player_id: str):
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Player not found"
             )
-        
+
         # Convert all ObjectIds to strings in player data
         player_data = convert_objectid_to_str(player)
-        
+
         # Initialize handAndNotes list
         hands_and_notes = []
-        
+
         # Process each hand reference
         for hand_ref in player.get("handReferences", []):
             try:
                 # Get hand and note IDs
                 hand_id = hand_ref.get("handId")
                 note_id = hand_ref.get("noteId")
-                
+
                 if not hand_id or not note_id:
                     continue
-                
+
                 # Fetch hand and note from database
                 hand = await hands_collection.find_one({"_id": hand_id})
                 note = await notes_collection.find_one({"_id": note_id})
-                
+
                 if not hand or not note:
                     continue
-                
+
                 # Convert ObjectIds to strings
                 hand_data = convert_objectid_to_str(hand)
                 note_data = convert_objectid_to_str(note)
-                
+
                 # Create Hand and Note objects
                 hand_obj = Hand(**hand_data)
                 note_obj = Note(**note_data)
-                
+
                 # Add to handAndNotes list
                 hands_and_notes.append(HandNotesPair(hand=hand_obj, note=note_obj))
-                
+
             except Exception:
                 # Skip this hand/note pair if there's an error
                 pass
-        
+
         # Sort hands and notes by date (newest first)
         hands_and_notes.sort(key=lambda x: x.hand.date, reverse=True)
-        
+
         # Create Player object
         player_obj = Player(**player_data)
-        
+
         # Return combined result
         return PlayerWithHandsAndNotes(
             player=player_obj,
             handAndNotes=hands_and_notes
         )
-        
+
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
