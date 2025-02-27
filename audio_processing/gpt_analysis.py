@@ -752,3 +752,111 @@ async def identify_players(transcript: str) -> Dict:
         print(f"Error in identify_players: {str(e)}")
         player_data = {"players": extract_basic_info(processed_transcript)["players"]}
         return player_data
+    
+async def generate_summary(transcript: str) -> str:
+    """Generates a concise summary of the hand"""
+    try:
+        # Preprocess transcript to correct common errors
+        processed_transcript = preprocess_transcript(transcript)
+        print(f"Generating summary for preprocessed transcript")
+        
+        response = await client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a concise poker hand summarizer."
+                },
+                {
+                    "role": "user",
+                    "content": SUMMARY_PROMPT.format(transcript=processed_transcript)
+                }
+            ],
+            temperature=0.3  # Lower temperature for more consistent response
+        )
+
+        if response and response.choices:
+            summary = response.choices[0].message.content.strip()
+            print(f"Generated summary: {summary}")
+            return summary if summary else "No summary available"
+        return "No summary available"
+    except Exception as e:
+        print(f"Error in generate_summary: {str(e)}")
+        return "No summary available"
+
+
+async def generate_insight(transcript: str) -> str:
+    """Generates strategic insights from the hand"""
+    try:
+        # Preprocess transcript to correct common errors
+        processed_transcript = preprocess_transcript(transcript)
+        print(f"Generating insights for preprocessed transcript")
+        
+        response = await client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a precise poker hand analyst."
+                },
+                {
+                    "role": "user",
+                    "content": INSIGHT_PROMPT.format(transcript=processed_transcript)
+                }
+            ],
+            temperature=0.3  # Lower temperature for more consistent response
+        )
+
+        if response and response.choices:
+            insight = response.choices[0].message.content.strip()
+            print(f"Generated insight: {insight}")
+            return insight if insight else "No insights available"
+        return "No insights available"
+    except Exception as e:
+        print(f"Error in generate_insight: {str(e)}")
+        return "No insights available"
+    
+async def process_transcript(transcript: str) -> Dict[str, Any]:
+    """Process transcript and return all required data"""
+    try:
+        print(f"Processing transcript: {transcript}")
+        
+        # Process all data with proper fallbacks
+        hand_data = await extract_hand_data(transcript)
+        print(f"Hand data extraction complete: {hand_data}")
+        
+        player_data = await identify_players(transcript)
+        print(f"Player data extraction complete: {player_data}")
+        
+        # Merge player data from both sources
+        merged_players = merge_player_data(hand_data.get("players", []), player_data.get("players", []))
+        
+        # Update hand_data with merged players
+        hand_data["players"] = merged_players
+        print(f"Updated hand_data with merged players: {hand_data}")
+        
+        # Generate summary and insight
+        summary = await generate_summary(transcript)
+        print(f"Summary generation complete")
+        
+        insight = await generate_insight(transcript)
+        print(f"Insight generation complete")
+
+        result = {
+            "hand_data": hand_data,
+            "player_data": player_data,
+            "summary": summary,
+            "insight": insight
+        }
+        
+        print(f"Transcript processing complete")
+        return result
+    except Exception as e:
+        print(f"Error in process_transcript: {str(e)}")
+        basic_info = extract_basic_info(transcript)
+        return {
+            "hand_data": basic_info,
+            "player_data": {"players": basic_info["players"]},
+            "summary": "Error processing transcript",
+            "insight": "Error processing transcript"
+        }
