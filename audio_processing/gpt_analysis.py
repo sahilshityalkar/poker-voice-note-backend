@@ -636,7 +636,91 @@ async def extract_hand_data(transcript: str) -> Dict:
     try:
         # Preprocess transcript to correct common errors
         processed_transcript = preprocess_transcript(transcript)
-        print(f"Extracting hand data from preprocessed transcript")
+        print(f"Starting GPT call for hand data extraction...")
+        
+        try:
+            # Make the GPT API call with ONLY the essential parameters
+            response = await client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": """You are a precise poker hand parser. Extract and return ONLY this JSON structure:
+{
+    "players": [
+        {
+            "name": "string (player name)",
+            "position": "string (UTG/MP/CO/BTN/SB/BB)",
+            "won": boolean
+        }
+    ],
+    "myPosition": "string (UTG/MP/CO/BTN/SB/BB)",
+    "iWon": boolean,
+    "potSize": number or null
+}"""
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Parse this poker hand and return ONLY the JSON structure: {processed_transcript}"
+                    }
+                ],
+                temperature=0.1
+            )
+            
+            print("GPT API call successful")
+            
+            if hasattr(response, 'choices') and len(response.choices) > 0:
+                response_text = response.choices[0].message.content
+                print(f"Raw GPT response: {response_text}")
+                
+                # Clean and parse the response
+                cleaned_response = clean_gpt_response(response_text)
+                try:
+                    hand_data = json.loads(cleaned_response)
+                    print(f"Successfully parsed hand data: {hand_data}")
+                    
+                    # Validate the hand data
+                    is_valid, error = await validate_hand_data(hand_data)
+                    if not is_valid:
+                        print(f"Validation failed: {error}, using basic extraction")
+                        return extract_basic_info(processed_transcript)
+                    
+                    # Double check win status
+                    if "players" in hand_data:
+                        for player in hand_data["players"]:
+                            player_name = player.get("name", "")
+                            detected_win = detect_win_status(player_name, processed_transcript)
+                            if player["won"] != detected_win:
+                                print(f"Correcting win status for {player_name}")
+                                player["won"] = detected_win
+                        
+                        detected_narrator_win = detect_win_status("i", processed_transcript)
+                        if hand_data["iWon"] != detected_narrator_win:
+                            print(f"Correcting narrator win status")
+                            hand_data["iWon"] = detected_narrator_win
+                    
+                    return hand_data
+                    
+                except json.JSONDecodeError as e:
+                    print(f"JSON parsing failed: {e}")
+                    return extract_basic_info(processed_transcript)
+            else:
+                print("Invalid GPT response structure")
+                return extract_basic_info(processed_transcript)
+                
+        except Exception as e:
+            print(f"GPT API error: {str(e)}")
+            return extract_basic_info(processed_transcript)
+
+    except Exception as e:
+        print(f"General error: {str(e)}")
+        return extract_basic_info(processed_transcript)
+
+async def identify_players(transcript: str) -> Dict:
+    """Identifies and analyzes players from transcript"""
+    try:
+        processed_transcript = preprocess_transcript(transcript)
+        print(f"Starting GPT call for player identification...")
         
         try:
             response = await client.chat.completions.create(
@@ -644,116 +728,58 @@ async def extract_hand_data(transcript: str) -> Dict:
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are a precise poker hand parser. Respond with valid JSON only."
+                        "content": """You are a precise poker player identifier. Return ONLY this JSON structure:
+{
+    "players": [
+        {
+            "name": "string (player name)",
+            "position": "string (UTG/MP/CO/BTN/SB/BB)",
+            "won": boolean
+        }
+    ]
+}"""
                     },
                     {
                         "role": "user",
-                        "content": HAND_DATA_PROMPT.format(transcript=processed_transcript)
+                        "content": f"Identify all players in this poker hand and return ONLY the JSON structure: {processed_transcript}"
                     }
                 ],
-                response_format={"type": "json_object"},  # Force JSON response
-                temperature=0.1  # Lower temperature for more consistent responses
+                temperature=0.1
             )
             
-            print(f"GPT response received for hand data")
+            print("GPT API call successful")
             
             if hasattr(response, 'choices') and len(response.choices) > 0:
                 response_text = response.choices[0].message.content
-                print(f"Raw hand data response: '{response_text}'")
-                
-                cleaned_response = clean_gpt_response(response_text)
-                try:
-                    hand_data = json.loads(cleaned_response)
-                    print(f"Parsed hand data: {hand_data}")
-                except json.JSONDecodeError as json_err:
-                    print(f"Failed to parse hand data JSON after cleaning: {json_err}")
-                    hand_data = extract_basic_info(processed_transcript)
-                    print(f"Used basic extraction as fallback: {hand_data}")
-                    return hand_data
-            else:
-                print("Invalid response structure from GPT API")
-                hand_data = extract_basic_info(processed_transcript)
-                return hand_data
-                
-        except Exception as api_error:
-            print(f"Error calling GPT API: {str(api_error)}")
-            hand_data = extract_basic_info(processed_transcript)
-            return hand_data
-
-        is_valid, error = await validate_hand_data(hand_data)
-        if not is_valid:
-            print(f"Hand Data failed validation: {error}")
-            hand_data = extract_basic_info(processed_transcript)
-            return hand_data
-
-        return hand_data
-    except Exception as e:
-        print(f"Error in extract_hand_data: {str(e)}")
-        hand_data = extract_basic_info(processed_transcript)
-        return hand_data
-    
-async def identify_players(transcript: str) -> Dict:
-    """Identifies and analyzes players from transcript"""
-    try:
-        # Preprocess transcript to correct common errors
-        # processed_transcript = preprocess_transcript(transcript)
-        preprocess_transcript = transcript
-        print(f"Identifying players from preprocessed transcript")
-        
-        try:
-            response = await client.chat.completions.create(
-                model="gpt-4-turbo",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a precise poker player identifier. Respond with valid JSON only."
-                    },
-                    {
-                        "role": "user",
-                        "content": HAND_DATA_PROMPT.format(transcript=preprocess_transcript)
-                    }
-                ],
-                response_format={"type": "json_object"},  # Force JSON response
-                temperature=0.1  # Lower temperature for more consistent responses
-            )
-            
-            print(f"GPT response received for player analysis")
-            
-            if hasattr(response, 'choices') and len(response.choices) > 0:
-                response_text = response.choices[0].message.content
-                print(f"Raw player analysis response: '{response_text}'")
+                print(f"Raw GPT response: {response_text}")
                 
                 cleaned_response = clean_gpt_response(response_text)
                 try:
                     player_data = json.loads(cleaned_response)
-                    print(f"Parsed player data: {player_data}")
-                except json.JSONDecodeError as json_err:
-                    print(f"Failed to parse player data JSON after cleaning: {json_err}")
-                    player_data = {"players": extract_basic_info(transcript)["players"]}
-                    print(f"Used basic extraction as fallback: {player_data}")
-                    return player_data
+                    print(f"Successfully parsed player data: {player_data}")
+                    
+                    is_valid, validated_data = await validate_player_data(player_data)
+                    if not is_valid or not validated_data.get("players"):
+                        print("Validation failed, using basic extraction")
+                        return {"players": extract_basic_info(transcript)["players"]}
+                    
+                    return validated_data
+                    
+                except json.JSONDecodeError as e:
+                    print(f"JSON parsing failed: {e}")
+                    return {"players": extract_basic_info(transcript)["players"]}
             else:
-                print("Invalid response structure from GPT API")
-                player_data = {"players": extract_basic_info(transcript)["players"]}
-                return player_data
+                print("Invalid GPT response structure")
+                return {"players": extract_basic_info(transcript)["players"]}
                 
-        except Exception as api_error:
-            print(f"Error calling GPT API: {str(api_error)}")
-            player_data = {"players": extract_basic_info(transcript)["players"]}
-            return player_data
+        except Exception as e:
+            print(f"GPT API error: {str(e)}")
+            return {"players": extract_basic_info(transcript)["players"]}
 
-        is_valid, validated_data = await validate_player_data(player_data)
-        if not is_valid or not validated_data.get("players"):
-            print("Player data failed validation or has no players")
-            player_data = {"players": extract_basic_info(transcript)["players"]}
-            return player_data
-            
-        return validated_data
     except Exception as e:
-        print(f"Error in identify_players: {str(e)}")
-        player_data = {"players": extract_basic_info(transcript)["players"]}
-        return player_data
-    
+        print(f"General error: {str(e)}")
+        return {"players": extract_basic_info(transcript)["players"]}
+
 async def generate_summary(transcript: str) -> str:
     """Generates a concise summary of the hand"""
     try:
