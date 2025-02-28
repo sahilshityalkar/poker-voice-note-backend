@@ -628,15 +628,19 @@ async def extract_hand_data(transcript: str) -> Dict:
 }
 
 Important rules:
-1. Detect win/loss status accurately from the transcript context
-2. Set position as "Unknown" if not clearly mentioned
-3. Include all players mentioned in the transcript
-4. Set potSize as null if not explicitly mentioned
-5. Determine myPosition based on the narrator's position"""
+1. ALWAYS assign a position for every player and the narrator (myPosition)
+2. If position is not explicitly mentioned:
+   - Look at betting order to determine positions
+   - In a 6-max game, positions are: UTG, MP, CO, BTN, SB, BB
+   - In a 3-4 player game, positions are: CO, BTN, SB, BB
+   - Never return "Unknown" as a position
+3. Detect win/loss status accurately from the transcript context
+4. Include all players mentioned in the transcript
+5. Set potSize as null if not explicitly mentioned"""
                     },
                     {
                         "role": "user",
-                        "content": f"Parse this poker hand and return ONLY the JSON structure: {processed_transcript}"
+                        "content": f"Parse this poker hand and return ONLY the JSON structure. Remember to assign positions for everyone based on betting order: {processed_transcript}"
                     }
                 ],
                 temperature=0.1
@@ -660,10 +664,18 @@ Important rules:
                         print(f"Validation failed: {error}")
                         return {
                             "players": [],
-                            "myPosition": "Unknown",
+                            "myPosition": "MP",  # Default to MP instead of Unknown
                             "iWon": False,
                             "potSize": None
                         }
+                    
+                    # Ensure no Unknown positions
+                    if hand_data["myPosition"] == "Unknown":
+                        hand_data["myPosition"] = "MP"
+                    
+                    for player in hand_data["players"]:
+                        if player["position"] == "Unknown":
+                            player["position"] = "MP"
                     
                     return hand_data
                     
@@ -671,7 +683,7 @@ Important rules:
                     print(f"JSON parsing failed: {e}")
                     return {
                         "players": [],
-                        "myPosition": "Unknown",
+                        "myPosition": "MP",  # Default to MP instead of Unknown
                         "iWon": False,
                         "potSize": None
                     }
@@ -679,7 +691,7 @@ Important rules:
                 print("Invalid GPT response structure")
                 return {
                     "players": [],
-                    "myPosition": "Unknown",
+                    "myPosition": "MP",  # Default to MP instead of Unknown
                     "iWon": False,
                     "potSize": None
                 }
@@ -688,7 +700,7 @@ Important rules:
             print(f"GPT API error: {str(e)}")
             return {
                 "players": [],
-                "myPosition": "Unknown",
+                "myPosition": "MP",  # Default to MP instead of Unknown
                 "iWon": False,
                 "potSize": None
             }
@@ -697,7 +709,7 @@ Important rules:
         print(f"General error: {str(e)}")
         return {
             "players": [],
-            "myPosition": "Unknown",
+            "myPosition": "MP",  # Default to MP instead of Unknown
             "iWon": False,
             "potSize": None
         }
@@ -726,14 +738,18 @@ async def identify_players(transcript: str) -> Dict:
 }
 
 Important rules:
-1. Include all players mentioned in the transcript
-2. Set position as "Unknown" if not clearly mentioned
+1. ALWAYS assign a position for every player
+2. If position is not explicitly mentioned:
+   - Look at betting order to determine positions
+   - In a 6-max game, positions are: UTG, MP, CO, BTN, SB, BB
+   - In a 3-4 player game, positions are: CO, BTN, SB, BB
+   - Never return "Unknown" as a position
 3. Determine win/loss status from explicit mentions in the transcript
 4. Do not include the narrator in this list"""
                     },
                     {
                         "role": "user",
-                        "content": f"Identify all players in this poker hand and return ONLY the JSON structure: {processed_transcript}"
+                        "content": f"Identify all players in this poker hand and return ONLY the JSON structure. Remember to assign positions for everyone based on betting order: {processed_transcript}"
                     }
                 ],
                 temperature=0.1
@@ -754,6 +770,11 @@ Important rules:
                     if not is_valid:
                         print("Validation failed")
                         return {"players": []}
+                    
+                    # Ensure no Unknown positions
+                    for player in validated_data["players"]:
+                        if player["position"] == "Unknown":
+                            player["position"] = "MP"
                     
                     return validated_data
                     
