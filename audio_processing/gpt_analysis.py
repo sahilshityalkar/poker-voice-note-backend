@@ -71,21 +71,6 @@ def preprocess_transcript(transcript: str) -> str:
             # Use word boundaries to avoid partial replacements
             processed = re.sub(r'\b' + re.escape(error) + r'\b', correction, processed)
         
-        # Fix common card notation patterns
-        # Convert "X of Y" to standard notation
-        processed = re.sub(r'(\w+) of (\w+)', r'\1 of \2', processed)
-        
-        # Fix action verbs
-        action_verbs = {
-            r'\braid\b': 'raise',
-            r'\braids\b': 'raises',
-            r'\brate\b': 'raise',
-            r'\brates\b': 'raises'
-        }
-        
-        for error_pattern, correction in action_verbs.items():
-            processed = re.sub(error_pattern, correction, processed)
-        
         print(f"Preprocessed transcript: {processed}")
         return processed
     except Exception as e:
@@ -282,69 +267,83 @@ def detect_win_status(player_name: str, transcript: str) -> bool:
     transcript = transcript.lower()
     player_name = player_name.lower()
     
-    # Direct win phrases
+    # First check for explicit loss mentions
+    if "i" == player_name or "me" == player_name:
+        loss_phrases = [
+            "i lost",
+            "i lose",
+            "lost the hand",
+            "lost to",
+            "beat me",
+            "beats me"
+        ]
+        if any(phrase in transcript for phrase in loss_phrases):
+            print(f"Detected explicit loss for narrator")
+            return False
+            
+    else:
+        # Check if another player explicitly lost
+        loss_context = [
+            f"{player_name} lost",
+            f"{player_name} loses",
+            f"beat {player_name}",
+            f"beats {player_name}"
+        ]
+        if any(phrase in transcript for phrase in loss_context):
+            print(f"Detected explicit loss for {player_name}")
+            return False
+    
+    # Now check for explicit win mentions
     if "i" == player_name or "me" == player_name:
         # Phrases indicating narrator won
         win_phrases = [
-            "i won", "i win", "i got the pot", "i took the pot", 
-            "i won with", "i had the best hand", "paid me", "my hand won",
-            "i won equal", "i won full", "i want the pot", "i want",
-            "i had full house", "i had flush", "i had straight",
-            "paid off"
+            "i won the hand",
+            "i won the pot",
+            "i took the pot",
+            "paid me",
+            "i scooped"
         ]
         if any(phrase in transcript for phrase in win_phrases):
-            print(f"Detected narrator win based on direct phrases")
+            print(f"Detected explicit win for narrator")
             return True
             
-        # Check for winning hands in context of "I"
-        winning_hands = ["full house", "flush", "straight", "three of a kind", "two pair"]
-        for hand in winning_hands:
-            if hand in transcript:
-                # Check if "I" is mentioned near the winning hand
-                hand_index = transcript.find(hand)
-                context = transcript[max(0, hand_index-30):hand_index]
-                if "i" in context or "my" in context:
-                    print(f"Detected narrator win based on winning hand: {hand}")
-                    return True
+        # Having a good hand doesn't mean winning
+        # So we don't check for hands unless there's explicit win mention
+            
     else:
         # Phrases indicating another player won
         win_context = [
             f"{player_name} won",
-            f"{player_name} win",
-            f"{player_name} got the pot",
+            f"{player_name} wins",
             f"{player_name} took the pot",
-            f"{player_name} had the best hand"
+            f"{player_name} scooped",
+            f"lost to {player_name}",
+            f"won by {player_name}"
         ]
         
         if any(phrase in transcript for phrase in win_context):
-            print(f"Detected win for {player_name} based on direct phrases")
+            print(f"Detected explicit win for {player_name}")
             return True
-            
-        # Check if player showed winning hand at showdown
-        showdown_patterns = [
-            f"{player_name} show", 
-            f"{player_name} had",
-            f"{player_name} revealed"
-        ]
-        
-        for pattern in showdown_patterns:
-            if pattern in transcript:
-                # Get the context after the showdown pattern
-                pattern_index = transcript.find(pattern)
-                after_context = transcript[pattern_index:pattern_index+60]
-                
-                # Check for winning hands in this context
-                winning_hands = ["full house", "flush", "straight", "three of a kind", "two pair"]
-                if any(hand in after_context for hand in winning_hands):
-                    # Make sure no other player is mentioned as winner after this
-                    if "won" in transcript[pattern_index:]:
-                        won_index = transcript.find("won", pattern_index)
-                        pre_win_context = transcript[won_index-20:won_index]
-                        if player_name in pre_win_context:
-                            print(f"Detected win for {player_name} based on showdown with winning hand")
-                            return True
     
-    # No win detected
+    # If no explicit win/loss found, look for showdown results
+    if "showdown" in transcript or "showed" in transcript or "turned over" in transcript:
+        # Get the last part of the transcript after showdown
+        showdown_idx = max(
+            transcript.rfind("showdown"),
+            transcript.rfind("showed"),
+            transcript.rfind("turned over")
+        )
+        if showdown_idx != -1:
+            end_context = transcript[showdown_idx:]
+            # Check if this player won at showdown
+            if player_name == "i":
+                if "i had the best hand" in end_context or "i win" in end_context:
+                    return True
+            else:
+                if f"{player_name} had the best hand" in end_context or f"lost to {player_name}" in end_context:
+                    return True
+    
+    # Default to false if no clear win detected
     return False
 
 
@@ -466,55 +465,34 @@ async def validate_hand_data(data: Dict) -> Tuple[bool, Optional[str]]:
             data["players"] = []
             print("Players field was not a list, set to empty list")
 
-        # Validate each player
-        validated_players = []
+        # Trust GPT's player data
         for player in data["players"]:
             if not isinstance(player, dict):
                 continue
-            print(f"Validating player: {player}")
+            print(f"Player data from GPT: {player}")
             
-            # Ensure name exists and is valid
+            # Ensure required fields exist
             if not player.get("name"):
-                print(f"Player has no name, skipping: {player}")
                 continue
                 
-            # Clean player name
-            clean_name = player.get("name", "Unknown").strip()
-            if not re.match(rules["name_pattern"], clean_name):
-                clean_name = re.sub(r'[^A-Za-z\s]', '', clean_name).strip().capitalize()
-                if not clean_name or len(clean_name) < 2:
-                    print(f"Invalid player name after cleaning, skipping: {player}")
-                    continue
-                    
-            # Validate position
-            position = player.get("position", "MP")  # Default to MP instead of Unknown
-            if position not in rules["valid_positions"]:
-                position = "MP"  # Default to middle position
-                print(f"Invalid position '{player.get('position')}', set to MP")
-            
-            # Add validated player
-            validated_players.append({
-                "name": clean_name,
-                "position": position,
-                "won": bool(player.get("won", False))
-            })
-            
-        # Update players with validated list
-        data["players"] = validated_players
+            # Trust GPT's position assignment
+            if not player.get("position"):
+                player["position"] = "Unknown"
+                
+            # Trust GPT's win status
+            if "won" not in player:
+                player["won"] = False
 
-        # Validate myPosition with default
-        if data.get("myPosition") not in rules["valid_positions"]:
-            data["myPosition"] = "BB"  # Default to BB for the narrator
-            print(f"Invalid myPosition '{data.get('myPosition')}', set to BB")
+        # Trust GPT's myPosition
+        if not data.get("myPosition"):
+            data["myPosition"] = "Unknown"
 
-        # Validate iWon
+        # Trust GPT's iWon status
         data["iWon"] = bool(data.get("iWon", False))
-        print(f"iWon status: {data['iWon']}")
 
-        # Validate potSize
-        if "potSize" in data and not isinstance(data["potSize"], (int, float, type(None))):
+        # Trust GPT's potSize
+        if "potSize" not in data:
             data["potSize"] = None
-            print(f"Invalid potSize type, set to None")
         
         print(f"Validation successful for hand data: {data}")
         return True, None
@@ -526,7 +504,6 @@ async def validate_hand_data(data: Dict) -> Tuple[bool, Optional[str]]:
 async def validate_player_data(data: Dict) -> Tuple[bool, Dict]:
     """Validates the player data structure from GPT"""
     try:
-        rules = get_validation_rules()["player_data"]
         print(f"Validating player data: {data}")
         if not isinstance(data, dict):
             print("Player data is not a dictionary")
@@ -536,36 +513,27 @@ async def validate_player_data(data: Dict) -> Tuple[bool, Dict]:
             print("Players field missing or not a list")
             return False, {"players": []}
             
-        # Validate each player
+        # Trust GPT's player data
         validated_players = []
         for player in data["players"]:
             if not isinstance(player, dict):
                 print(f"Player is not a dictionary: {player}")
                 continue
                 
-            # Ensure name is properly formatted
-            if "name" not in player or not player["name"]:
+            # Ensure name exists
+            if not player.get("name"):
                 print(f"Player has no name, skipping: {player}")
                 continue
                 
-            # Clean player name
-            clean_name = player["name"].strip().capitalize()
-            if not clean_name or len(clean_name) < 2:
-                print(f"Invalid player name after cleaning, skipping: {player}")
-                continue
+            # Trust GPT's position
+            if not player.get("position"):
+                player["position"] = "Unknown"
                 
-            # Ensure position is valid
-            position = player.get("position", "MP")  # Default to MP
-            if position not in rules["valid_positions"]:
-                position = "MP"  # Default to middle position
-                print(f"Invalid position for {clean_name}: {position}, set to MP")
+            # Trust GPT's win status
+            if "won" not in player:
+                player["won"] = False
                 
-            # Add validated player
-            validated_players.append({
-                "name": clean_name,
-                "position": position,
-                "won": bool(player.get("won", False))
-            })
+            validated_players.append(player)
                 
         # Update players with validated list
         data["players"] = validated_players
@@ -632,14 +600,14 @@ def merge_player_data(hand_players: List[Dict], analysis_players: List[Dict]) ->
 
 
 async def extract_hand_data(transcript: str) -> Dict:
-    """Extracts structured hand data from transcript"""
+    """Extracts structured hand data from transcript using GPT only"""
     try:
         # Preprocess transcript to correct common errors
         processed_transcript = preprocess_transcript(transcript)
         print(f"Starting GPT call for hand data extraction...")
         
         try:
-            # Make the GPT API call with ONLY the essential parameters
+            # Make the GPT API call
             response = await client.chat.completions.create(
                 model="gpt-4",
                 messages=[
@@ -657,7 +625,14 @@ async def extract_hand_data(transcript: str) -> Dict:
     "myPosition": "string (UTG/MP/CO/BTN/SB/BB)",
     "iWon": boolean,
     "potSize": number or null
-}"""
+}
+
+Important rules:
+1. Detect win/loss status accurately from the transcript context
+2. Set position as "Unknown" if not clearly mentioned
+3. Include all players mentioned in the transcript
+4. Set potSize as null if not explicitly mentioned
+5. Determine myPosition based on the narrator's position"""
                     },
                     {
                         "role": "user",
@@ -682,42 +657,53 @@ async def extract_hand_data(transcript: str) -> Dict:
                     # Validate the hand data
                     is_valid, error = await validate_hand_data(hand_data)
                     if not is_valid:
-                        print(f"Validation failed: {error}, using basic extraction")
-                        return extract_basic_info(processed_transcript)
-                    
-                    # Double check win status
-                    if "players" in hand_data:
-                        for player in hand_data["players"]:
-                            player_name = player.get("name", "")
-                            detected_win = detect_win_status(player_name, processed_transcript)
-                            if player["won"] != detected_win:
-                                print(f"Correcting win status for {player_name}")
-                                player["won"] = detected_win
-                        
-                        detected_narrator_win = detect_win_status("i", processed_transcript)
-                        if hand_data["iWon"] != detected_narrator_win:
-                            print(f"Correcting narrator win status")
-                            hand_data["iWon"] = detected_narrator_win
+                        print(f"Validation failed: {error}")
+                        return {
+                            "players": [],
+                            "myPosition": "Unknown",
+                            "iWon": False,
+                            "potSize": None
+                        }
                     
                     return hand_data
                     
                 except json.JSONDecodeError as e:
                     print(f"JSON parsing failed: {e}")
-                    return extract_basic_info(processed_transcript)
+                    return {
+                        "players": [],
+                        "myPosition": "Unknown",
+                        "iWon": False,
+                        "potSize": None
+                    }
             else:
                 print("Invalid GPT response structure")
-                return extract_basic_info(processed_transcript)
+                return {
+                    "players": [],
+                    "myPosition": "Unknown",
+                    "iWon": False,
+                    "potSize": None
+                }
                 
         except Exception as e:
             print(f"GPT API error: {str(e)}")
-            return extract_basic_info(processed_transcript)
+            return {
+                "players": [],
+                "myPosition": "Unknown",
+                "iWon": False,
+                "potSize": None
+            }
 
     except Exception as e:
         print(f"General error: {str(e)}")
-        return extract_basic_info(processed_transcript)
+        return {
+            "players": [],
+            "myPosition": "Unknown",
+            "iWon": False,
+            "potSize": None
+        }
 
 async def identify_players(transcript: str) -> Dict:
-    """Identifies and analyzes players from transcript"""
+    """Identifies and analyzes players from transcript using GPT only"""
     try:
         processed_transcript = preprocess_transcript(transcript)
         print(f"Starting GPT call for player identification...")
@@ -737,7 +723,13 @@ async def identify_players(transcript: str) -> Dict:
             "won": boolean
         }
     ]
-}"""
+}
+
+Important rules:
+1. Include all players mentioned in the transcript
+2. Set position as "Unknown" if not clearly mentioned
+3. Determine win/loss status from explicit mentions in the transcript
+4. Do not include the narrator in this list"""
                     },
                     {
                         "role": "user",
@@ -759,26 +751,26 @@ async def identify_players(transcript: str) -> Dict:
                     print(f"Successfully parsed player data: {player_data}")
                     
                     is_valid, validated_data = await validate_player_data(player_data)
-                    if not is_valid or not validated_data.get("players"):
-                        print("Validation failed, using basic extraction")
-                        return {"players": extract_basic_info(transcript)["players"]}
+                    if not is_valid:
+                        print("Validation failed")
+                        return {"players": []}
                     
                     return validated_data
                     
                 except json.JSONDecodeError as e:
                     print(f"JSON parsing failed: {e}")
-                    return {"players": extract_basic_info(transcript)["players"]}
+                    return {"players": []}
             else:
                 print("Invalid GPT response structure")
-                return {"players": extract_basic_info(transcript)["players"]}
+                return {"players": []}
                 
         except Exception as e:
             print(f"GPT API error: {str(e)}")
-            return {"players": extract_basic_info(transcript)["players"]}
+            return {"players": []}
 
     except Exception as e:
         print(f"General error: {str(e)}")
-        return {"players": extract_basic_info(transcript)["players"]}
+        return {"players": []}
 
 async def generate_summary(transcript: str) -> str:
     """Generates a concise summary of the hand"""
@@ -848,15 +840,17 @@ async def process_transcript(transcript: str) -> Dict[str, Any]:
     try:
         print(f"Processing transcript: {transcript}")
         
-        # Process all data with proper fallbacks
+        # Get hand data directly from GPT
         hand_data = await extract_hand_data(transcript)
         print(f"Hand data extraction complete: {hand_data}")
         
+        # Get player data directly from GPT
         player_data = await identify_players(transcript)
         print(f"Player data extraction complete: {player_data}")
         
-        hand_data["players"] =  player_data.get("players", [])
-        print(f"Updated hand_data with merged players: {hand_data}")
+        # Trust GPT's player data
+        hand_data["players"] = player_data.get("players", [])
+        print(f"Updated hand_data with players: {hand_data}")
         
         # Generate summary and insight
         summary = await generate_summary(transcript)
@@ -876,10 +870,14 @@ async def process_transcript(transcript: str) -> Dict[str, Any]:
         return result
     except Exception as e:
         print(f"Error in process_transcript: {str(e)}")
-        basic_info = extract_basic_info(transcript)
         return {
-            "hand_data": basic_info,
-            "player_data": {"players": basic_info["players"]},
+            "hand_data": {
+                "players": [],
+                "myPosition": "Unknown",
+                "iWon": False,
+                "potSize": None
+            },
+            "player_data": {"players": []},
             "summary": "Error processing transcript",
             "insight": "Error processing transcript"
-}
+        }
