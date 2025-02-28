@@ -46,7 +46,7 @@ class Player(BaseModel):
         json_encoders = {
             ObjectId: str  # Convert ObjectId to string
         }
-        allow_population_by_field_name = True #allows alias to work
+        populate_by_name = True #allows alias to work
 
 @router.get("/players/{user_id}", response_model=List[Player])
 async def get_players_by_user_id(user_id: UUID):

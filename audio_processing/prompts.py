@@ -3,59 +3,74 @@
 HAND_DATA_PROMPT = """
 You are a professional poker data analyzer specializing in hand history extraction. Extract the following JSON structure from the transcript:
 
-{
-    "players": [
-        {
-            "name": "string (exactly as mentioned in the transcript)",
-            "position": "string (must be UTG/MP/CO/BTN/SB/BB only)",
-            "won": "boolean (true/false)"
-        }
-    ],
-    "myPosition": "string (must be UTG/MP/CO/BTN/SB/BB only)",
-    "iWon": "boolean (did I win the hand, true/false)",
-    "potSize": "number or null (in big blinds, or null if not specifically mentioned)"
-}
+{{
+"players": [
+{{
+"name": "string (exactly as mentioned in the transcript)",
+"position": "string (must be UTG/MP/CO/BTN/SB/BB only)",
+"won": "boolean (true/false)"
+}}
+],
+"myPosition": "string (must be UTG/MP/CO/BTN/SB/BB only)",
+"iWon": "boolean (did I win the hand, true/false)",
+"potSize": "number or null (in big blinds, or null if not specifically mentioned)"
+}}
 
-IMPORTANT: When positions aren't explicitly stated, you must infer them based on:
-1. Betting order (first to act preflop is typically UTG, followed by MP, CO, BTN, SB, BB)
-2. Action sequence (the order players act can reveal their positions)
-3. Context clues (references to position even if abbreviations aren't used)
+CRITICAL RULES:
 
-Position Inference Guidelines:
-- First player to act pre-flop is typically UTG (Under the Gun)
-- Last player to act pre-flop is typically BB (Big Blind)
-- Second-to-last player to act pre-flop is typically SB (Small Blind) 
-- Player acting right before SB is typically BTN (Button)
-- If only 2-3 players are mentioned, use context to determine if they're in late positions (BTN/SB/BB)
-- DO NOT leave positions as "Unknown" - make a reasonable inference based on betting sequence
+Player Names vs. Positions:
 
-Position Mapping (use exact abbreviations):
-- "under the gun" or "utg" or "under the turn" or "first to act" = "UTG"
-- "middle position" or "mp" or "mid position" = "MP"
-- "cutoff" or "co" or "cut off" = "CO"
-- "button" or "btn" or "bottom position" or "dealer" = "BTN"
-- "small blind" or "sb" = "SB"
-- "big blind" or "bb" = "BB"
+Player names are ALWAYS actual names (e.g., Ryan, Bob). NEVER use positional terms (e.g., "button", "BB") as names.
 
-Win Detection Guidelines:
-- For the narrator ("I"): Look for phrases like "i won", "i got the pot", "i took", "paid off", "my hand won"
-- For other players: Check if the transcript explicitly says they won or showed a winning hand
-- Look for winning hand descriptions like "full house", "flush", "straight", etc. and who had them
-- If the transcript mentions a showdown, determine the winner based on the shown hands
-- Consider context when transcription errors make "won" sound like "want" or similar errors
+If the transcript says "Button raises" or "BB calls", associate these actions with the player already assigned to that position (e.g., if "Ryan is on the button", then "Button raises" = Ryan's action).
 
-Requirements:
-1. Include ALL players mentioned in the transcript 
-2. ALWAYS assign positions for all players - NEVER use "Unknown" for position
-3. If positions aren't explicitly stated, infer them based on betting order and context
-4. Detect win/loss status for each player
-5. Extract player names exactly as they appear in the transcript
-6. Only include pot size if explicitly mentioned in big blinds
+Position labels (BTN, SB, BB, etc.) are NOT player names unless explicitly part of a name (e.g., a player named "BTN Smith").
 
-Here is the transcript:
+Position Inference:
+
+If positions are not explicitly stated, infer them strictly using:
+
+Betting order (first preflop actor = UTG, last = BB).
+
+Action sequence (post-flop actions hint at positions).
+
+Explicit context (e.g., "Ryan is the dealer" = BTN).
+
+Example: If the transcript says "Ryan bets, Bob folds, Martin checks", infer positions as UTG (Ryan), MP (Bob), CO (Martin) based on betting order.
+
+Win Detection:
+
+For the narrator ("I"), check phrases like "I won" or "my flush took the pot".
+
+For others, use explicit wins (e.g., "Martin showed a straight and won") or showdown results.
+
+REQUIREMENTS:
+
+ALL players must have a position (UTG/MP/CO/BTN/SB/BB). NO "Unknown".
+
+Names must match the transcript EXACTLY (e.g., "Ryan", not "Button").
+
+If the transcript uses positional terms (e.g., "SB") without a name, infer the name from prior context (e.g., "Bob posted the SB" → SB = Bob).
+
+EXAMPLE:
+Transcript:
+"Ryan (BTN) raised. Martin in SB called. BB folded. Ryan won with a flush."
+
+Output:
+{{
+"players": [
+{{"name": "Ryan", "position": "BTN", "won": true}},
+{{"name": "Martin", "position": "SB", "won": false}}
+],
+"myPosition": "BTN",
+"iWon": true,
+"potSize": null
+}}
+
+Transcript to Analyze:
 {transcript}
 
-Return ONLY the JSON data structure. ENSURE every player has a position assigned (no "Unknown" positions).
+Return ONLY JSON. No explanations.
 """
 
 PLAYER_ANALYSIS_PROMPT = """
@@ -176,5 +191,5 @@ def get_validation_rules():
             "player_fields": ["name", "position", "actions", "won"],  # Fields for each player object
             "valid_positions": ["UTG", "MP", "CO", "BTN", "SB", "BB"],
             "name_pattern": r'^[A-Za-z\s]+$'  # Allow letters and spaces in names
-        }
     }
+}

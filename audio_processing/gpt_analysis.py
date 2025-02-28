@@ -152,7 +152,7 @@ def clean_gpt_response(response_text: str) -> str:
             cleaned = re.sub(r',\s*}', '}', cleaned)
             
             # Fix missing quotes around keys
-            pattern = r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)'
+            pattern = r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_])(\s:)'
             cleaned = re.sub(pattern, r'\1"\2"\3', cleaned)
             
             try:
@@ -696,12 +696,13 @@ async def identify_players(transcript: str) -> Dict:
     """Identifies and analyzes players from transcript"""
     try:
         # Preprocess transcript to correct common errors
-        processed_transcript = preprocess_transcript(transcript)
+        # processed_transcript = preprocess_transcript(transcript)
+        preprocess_transcript = transcript
         print(f"Identifying players from preprocessed transcript")
         
         try:
             response = await client.chat.completions.create(
-                model="gpt-4",
+                model="gpt-4-turbo",
                 messages=[
                     {
                         "role": "system",
@@ -709,7 +710,7 @@ async def identify_players(transcript: str) -> Dict:
                     },
                     {
                         "role": "user",
-                        "content": PLAYER_ANALYSIS_PROMPT.format(transcript=processed_transcript)
+                        "content": HAND_DATA_PROMPT.format(transcript=preprocess_transcript)
                     }
                 ],
                 response_format={"type": "json_object"},  # Force JSON response
@@ -728,29 +729,29 @@ async def identify_players(transcript: str) -> Dict:
                     print(f"Parsed player data: {player_data}")
                 except json.JSONDecodeError as json_err:
                     print(f"Failed to parse player data JSON after cleaning: {json_err}")
-                    player_data = {"players": extract_basic_info(processed_transcript)["players"]}
+                    player_data = {"players": extract_basic_info(transcript)["players"]}
                     print(f"Used basic extraction as fallback: {player_data}")
                     return player_data
             else:
                 print("Invalid response structure from GPT API")
-                player_data = {"players": extract_basic_info(processed_transcript)["players"]}
+                player_data = {"players": extract_basic_info(transcript)["players"]}
                 return player_data
                 
         except Exception as api_error:
             print(f"Error calling GPT API: {str(api_error)}")
-            player_data = {"players": extract_basic_info(processed_transcript)["players"]}
+            player_data = {"players": extract_basic_info(transcript)["players"]}
             return player_data
 
         is_valid, validated_data = await validate_player_data(player_data)
         if not is_valid or not validated_data.get("players"):
             print("Player data failed validation or has no players")
-            player_data = {"players": extract_basic_info(processed_transcript)["players"]}
+            player_data = {"players": extract_basic_info(transcript)["players"]}
             return player_data
             
         return validated_data
     except Exception as e:
         print(f"Error in identify_players: {str(e)}")
-        player_data = {"players": extract_basic_info(processed_transcript)["players"]}
+        player_data = {"players": extract_basic_info(transcript)["players"]}
         return player_data
     
 async def generate_summary(transcript: str) -> str:
@@ -828,11 +829,7 @@ async def process_transcript(transcript: str) -> Dict[str, Any]:
         player_data = await identify_players(transcript)
         print(f"Player data extraction complete: {player_data}")
         
-        # Merge player data from both sources
-        merged_players = merge_player_data(hand_data.get("players", []), player_data.get("players", []))
-        
-        # Update hand_data with merged players
-        hand_data["players"] = merged_players
+        hand_data["players"] =  player_data.get("players", [])
         print(f"Updated hand_data with merged players: {hand_data}")
         
         # Generate summary and insight
@@ -859,4 +856,4 @@ async def process_transcript(transcript: str) -> Dict[str, Any]:
             "player_data": {"players": basic_info["players"]},
             "summary": "Error processing transcript",
             "insight": "Error processing transcript"
-        }
+}

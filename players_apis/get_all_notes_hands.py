@@ -47,7 +47,7 @@ class Hand(BaseModel):
     players: List[PlayerInHand]
 
     class Config:
-        allow_population_by_field_name = True
+        populate_by_name = True
         arbitrary_types_allowed = True
         json_encoders = {
             ObjectId: str
@@ -74,7 +74,7 @@ class Note(BaseModel):
     updatedAt: datetime
 
     class Config:
-        allow_population_by_field_name = True
+        populate_by_name = True
         arbitrary_types_allowed = True
         json_encoders = {
             ObjectId: str
@@ -105,7 +105,7 @@ class Player(BaseModel):
     weaknesses: Optional[List[str]] = None
 
     class Config:
-        allow_population_by_field_name = True
+        populate_by_name = True
         arbitrary_types_allowed = True
         json_encoders = {
             ObjectId: str
