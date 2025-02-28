@@ -381,3 +381,94 @@ async def update_transcript(
     except Exception as e:
         print(f"Error updating transcript and re-running analysis: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/process-text/")
+async def process_text_input(
+    text_input: str = Body(..., description="The poker hand text to analyze"),
+    user_id: str = Header(None)
+):
+    """Endpoint to process text input directly without audio transcription"""
+    try:
+        if not user_id:
+            raise HTTPException(status_code=400, detail="User ID is required")
+
+        if not text_input or not text_input.strip():
+            raise HTTPException(status_code=400, detail="Text input is required")
+
+        print(f"Processing text input: {text_input}")
+
+        # Process text with GPT
+        processed_data = await process_transcript(text_input)
+        print(f"Processed data received from GPT analysis")
+
+        # Create note document
+        note_id = ObjectId()
+        note_doc = {
+            "_id": note_id,
+            "user_id": user_id,
+            "audioFileUrl": None,  # No audio file for text input
+            "transcriptFromDeepgram": text_input,  # Store original text as transcript
+            "summaryFromGPT": processed_data["summary"],
+            "insightFromGPT": processed_data["insight"],
+            "date": datetime.utcnow(),
+            "createdAt": datetime.utcnow(),
+            "updatedAt": datetime.utcnow()
+        }
+
+        # Create hand document
+        hand_data = processed_data["hand_data"]
+        print(f"Hand data for database: {hand_data}")
+        
+        hand_doc = {
+            "user_id": user_id,
+            "noteId": note_id,
+            "myPosition": hand_data.get("myPosition", "Unknown"),
+            "iWon": bool(hand_data.get("iWon", False)),
+            "potSize": hand_data.get("potSize"),
+            "date": datetime.utcnow(),
+            "createdAt": datetime.utcnow(),
+            "updatedAt": datetime.utcnow()
+        }
+
+        # Insert hand document
+        hand_result = await hands_collection.insert_one(hand_doc)
+        hand_id = hand_result.inserted_id
+        print(f"Created hand with ID: {hand_id}")
+
+        # Update note with hand reference
+        note_doc["handId"] = hand_id
+        await notes_collection.insert_one(note_doc)
+        print(f"Created note with ID: {note_id}")
+
+        # Process players
+        print(f"Processing players from hand data: {hand_data.get('players', [])}")
+        player_ids = await process_players(
+            user_id,
+            hand_data.get("players", []),
+            hand_id,
+            note_id
+        )
+
+        # Update hand with player references
+        if player_ids:
+            print(f"Updating hand with {len(player_ids)} player references")
+            await hands_collection.update_one(
+                {"_id": hand_id},
+                {"$set": {"players": player_ids}}
+            )
+        else:
+            print("No players to update in hand document")
+
+        return {
+            "noteId": str(note_id),
+            "handId": str(hand_id),
+            "transcript": text_input,
+            "summary": processed_data["summary"],
+            "insight": processed_data["insight"]
+        }
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"Error processing text input: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
