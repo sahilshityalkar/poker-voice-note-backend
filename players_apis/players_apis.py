@@ -50,6 +50,10 @@ async def get_players_with_last_analysis(user_id: str = Header(None)):
             # Serialize player ObjectIds to strings
             player_serialized = {k: serialize_object_id(v) for k, v in player.items()}
             
+            # Add notes count to the response
+            notes_count = len(player.get("notes", []))
+            player_serialized["notes_count"] = notes_count
+            
             # Get the most recent analysis for this player
             player_id = player["_id"]
             recent_analysis = await player_analysis_collection.find_one(
