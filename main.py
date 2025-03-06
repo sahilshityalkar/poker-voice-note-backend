@@ -11,9 +11,13 @@ from datetime import datetime, timedelta
 import asyncio
 from audio_processing.audio_api import router as audio_router  # Import the audio router
 from auth.login import router as login_router
-from audio_processing.get_all_notes_data import router as transcript_router
+from audio_processing.get_all_notes_data import router as notes_router
+from audio_processing.get_note_details import router as note_details_router
 from profile_apis.profile_api import router as profile_router
-from audio_processing.player_notes_api import router as player_notes_router  # New import for player notes
+from audio_processing.player_notes_api import router as player_notes_router  # Import for player notes
+from audio_processing.player_analysis_api import router as player_analysis_router  # Import for player analysis
+from players_apis.players_apis import router as players_apis_router  # Import for players APIs
+from players_apis.player_analysis_get_apis import router as player_analysis_get_router  # Import for player analysis get APIs
 # Remove all hand-related imports and players_apis
 
 # Load environment variables
@@ -31,13 +35,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include the audio router
-app.include_router(audio_router, prefix="/audio", tags=["Audio"])
+# Include routers
+app.include_router(audio_router, prefix="/audio", tags=["audio"])
 app.include_router(login_router, prefix="/auth", tags=["Authentication"])
-app.include_router(transcript_router, prefix="/transcripts", tags=["Notes"])
+app.include_router(notes_router, prefix="/notes", tags=["notes"])
+app.include_router(note_details_router, prefix="/notes", tags=["notes"])
 app.include_router(profile_router, prefix="/profile", tags=["profile"])
-app.include_router(player_notes_router, prefix="/player-notes", tags=["Player Notes"])  # Include the new router
-# Remove players_router include
+app.include_router(player_notes_router, prefix="/player-notes", tags=["player-notes"])
+app.include_router(player_analysis_router, tags=["player-analysis"])  # No prefix because it's already defined in the router
+app.include_router(players_apis_router, prefix="/players-api", tags=["players"])  # New players APIs
+app.include_router(player_analysis_get_router, prefix="/player-analysis", tags=["player-analysis"])  # Player analysis get APIs
 
 # Initialize OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -81,6 +88,29 @@ class AnalysisCache:
 
 # Initialize cache
 analysis_cache = AnalysisCache(expiry_minutes=60)
+
+# Create startup event to initialize indexes
+@app.on_event("startup")
+async def startup_event():
+    try:
+        from audio_processing.player_notes_api import ensure_indexes as ensure_player_notes_indexes
+        from audio_processing.player_analysis_api import ensure_indexes as ensure_player_analysis_indexes
+        
+        # Ensure database indexes exist
+        try:
+            await ensure_player_notes_indexes()
+        except Exception as e:
+            print(f"Warning: Error creating player notes indexes: {e}")
+            
+        try:
+            await ensure_player_analysis_indexes()
+        except Exception as e:
+            print(f"Warning: Error creating player analysis indexes: {e}")
+            
+        print("Application started, database setup complete.")
+    except Exception as e:
+        print(f"Warning: Error during startup: {e}")
+        # Continue anyway to avoid startup failures
 
 def create_analysis_prompt(notes: List[str]) -> str:
     """Create a detailed, structured prompt for GPT analysis."""
@@ -133,7 +163,7 @@ async def get_gpt_analysis(prompt: str) -> str:
                 {"role": "system", "content": "You are a poker coach. Be brief and specific."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=400,  # Reduced tokens for faster response
+            max_tokens=1000,  # Reduced tokens for faster response
             temperature=0.7
         )
         return response.choices[0].message.content

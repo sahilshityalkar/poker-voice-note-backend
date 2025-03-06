@@ -38,6 +38,22 @@ class UserProfileRead(BaseModel):
 class UserProfileUpdate(BaseModel):
     username: Optional[str] = Field(None, description="Username")
     profilePic: Optional[str] = Field(None, description="Profile picture URL")
+    app_language: Optional[str] = Field(None, description="App UI language code (e.g., 'en', 'hi', 'fr')")
+    notes_language: Optional[str] = Field(None, description="Notes language code (e.g., 'en', 'hi', 'fr')")
+
+    @validator("app_language", "notes_language")
+    def validate_language_code(cls, v):
+        if v is not None:
+            # List of supported language codes (matching Deepgram's supported languages)
+            supported_languages = [
+                "en", "hi", "fr", "es", "de", "it", "ja", "ko", "zh", "ru",
+                "pt", "nl", "pl", "ar", "tr", "vi", "th", "id", "ms", "fa",
+                "he", "el", "hu", "da", "fi", "sv", "no", "cs", "ro", "sk",
+                "uk", "hr", "ca", "fil", "ur", "bn", "ta", "te", "ml", "si"
+            ]
+            if v not in supported_languages:
+                raise ValueError(f"Unsupported language code. Must be one of: {', '.join(supported_languages)}")
+        return v
 
 
 class ChangePhoneNumberRequest(BaseModel):

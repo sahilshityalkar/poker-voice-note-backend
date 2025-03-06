@@ -46,25 +46,26 @@ class AuthRequest(BaseModel):
             raise ValueError("Invalid phone number format.")
         return phone_number
 
-
 class VerifyOTPRequest(BaseModel):
     phone_number: str
     otp: str
-    username: Optional[str] = Field(None, description="Username required for new users")
 
+class RegistrationCompleteRequest(BaseModel):
+    username: str = Field(..., min_length=3)
+    app_language: Optional[str] = Field(default="en")
+    notes_language: Optional[str] = Field(default="en")
 
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str
-    username: str
-    user_id: UUID4
-
+    username: Optional[str] = None
+    user_id: str
+    registration_complete: bool = False
 
 class AuthResponse(BaseModel):
     status: str
     message: str
-    username: Optional[str] = None  # Username returned if user exists
-
+    username: Optional[str] = None
 
 def create_access_token(data: dict):
     to_encode = data.copy()
@@ -73,56 +74,48 @@ def create_access_token(data: dict):
     encoded_jwt = jwt.encode(to_encode, JWT_SECRET, algorithm=ALGORITHM)
     return encoded_jwt
 
-
 @router.post("/auth", response_model=AuthResponse, tags=["Authentication"])
-async def authenticate(request: AuthRequest):
+async def initiate_auth(request: AuthRequest):
     """
-    Authenticates a user or initiates registration.
-
-    1. Checks if the phone number exists in the database.
-    2. If it exists, sends an OTP and returns the username (if available).
-    3. If it doesn't exist, sends an OTP and indicates the user needs to register.
+    Stage 1: Initiate authentication by sending OTP
     """
     phone_number = request.phone_number
-    print(f"Searching for user with phone number: {phone_number}")  # Debug print
+    print(f"Searching for user with phone number: {phone_number}")
 
     user = await users_collection.find_one({"mobileNumber": phone_number})
-    print(f"Query result: {user}")  # Debug Print
-
+    print(f"Query result: {user}")
 
     if user:
-        # User exists, send OTP and return username (if it has)
+        # User exists, send OTP and return username
         print(f"Sending OTP: {STATIC_OTP} to phone number: {phone_number}")
-
-        # Return username if exists
         return AuthResponse(
-            status="success", message="OTP sent successfully", username=user.get("username", None)
+            status="success",
+            message="OTP sent successfully",
+            username=user.get("username")
         )
     else:
-        # User doesn't exist, require username for registering
+        # User doesn't exist, send OTP for registration
         print(f"Sending OTP: {STATIC_OTP} to phone number: {phone_number}")
         return AuthResponse(
-            status="user_not_found", message="OTP sent.  Please verify OTP and provide a username to complete registration."
+            status="user_not_found",
+            message="OTP sent successfully"
         )
 
 @router.post("/verifyotp", response_model=TokenResponse, tags=["Authentication"])
 async def verify_otp(request: VerifyOTPRequest):
     """
-    Verifies the OTP.  If valid, either logs in an existing user or registers a new user.
+    Stage 2: Verify OTP and return user data
     """
     phone_number = request.phone_number
     otp = request.otp
-    username = request.username
 
     user = await users_collection.find_one({"mobileNumber": phone_number})
 
     if otp != STATIC_OTP:
         raise HTTPException(status_code=400, detail="Invalid OTP. Please try again.")
 
-
     if user:
-        # Existing user, log in.
-
+        # Existing user, log in
         access_token = create_access_token(
             data={"sub": user["username"], "user_id": user["user_id"]}
         )
@@ -131,27 +124,16 @@ async def verify_otp(request: VerifyOTPRequest):
             access_token=access_token,
             token_type="bearer",
             username=user["username"],
-            user_id=user["user_id"]
+            user_id=user["user_id"],
+            registration_complete=True
         )
     else:
-        # User doesn't exist, register.
-        if not username:
-            raise HTTPException(status_code=400, detail="Username is required for registration.")
-
-        existing_user = await users_collection.find_one({"mobileNumber": phone_number})
-        if existing_user:
-          raise HTTPException(
-              status_code=400,
-              detail="Phone number already registered."
-          )
-
-        user_id = uuid.uuid4()
+        # New user, create temporary user with registration_complete=False
+        user_id = str(uuid.uuid4())
         user_doc = {
-            "user_id": str(user_id),
+            "user_id": user_id,
             "mobileNumber": phone_number,
-            "username": username,
-            "profilePic": "",  # Empty string for profile picture
-            "isVerified": True,
+            "registration_complete": False,
             "createdAt": datetime.utcnow(),
             "updatedAt": datetime.utcnow(),
         }
@@ -161,16 +143,62 @@ async def verify_otp(request: VerifyOTPRequest):
         except Exception as e:
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to register user: {str(e)}"
+                detail=f"Failed to create temporary user: {str(e)}"
             )
 
         access_token = create_access_token(
-            data={"sub": username, "user_id": str(user_id)}
+            data={"sub": user_id, "user_id": user_id}
         )
 
         return TokenResponse(
             access_token=access_token,
             token_type="bearer",
-            username=username,
-            user_id=user_id
+            user_id=user_id,
+            registration_complete=False
         )
+
+@router.post("/complete-registration/{user_id}", response_model=TokenResponse, tags=["Authentication"])
+async def complete_registration(user_id: str, request: RegistrationCompleteRequest):
+    """
+    Stage 3: Complete registration with user details
+    """
+    user = await users_collection.find_one({"user_id": user_id})
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if user.get("registration_complete", False):
+        raise HTTPException(status_code=400, detail="Registration already completed")
+
+    # Update user with registration details
+    update_data = {
+        "username": request.username,
+        "app_language": request.app_language or "en",  # Default to English if not provided
+        "notes_language": request.notes_language or "en",  # Default to English if not provided
+        "registration_complete": True,
+        "updatedAt": datetime.utcnow()
+    }
+
+    try:
+        await users_collection.update_one(
+            {"user_id": user_id},
+            {"$set": update_data}
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to complete registration: {str(e)}"
+        )
+
+    # Create new access token
+    access_token = create_access_token(
+        data={"sub": request.username, "user_id": user_id}
+    )
+
+    return TokenResponse(
+        access_token=access_token,
+        token_type="bearer",
+        username=request.username,
+        user_id=user_id,
+        registration_complete=True
+    )
