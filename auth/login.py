@@ -115,18 +115,33 @@ async def verify_otp(request: VerifyOTPRequest):
         raise HTTPException(status_code=400, detail="Invalid OTP. Please try again.")
 
     if user:
-        # Existing user, log in
-        access_token = create_access_token(
-            data={"sub": user["username"], "user_id": user["user_id"]}
-        )
+        # Check if the user has completed registration
+        if user.get("registration_complete", False):
+            # Fully registered user, log in
+            access_token = create_access_token(
+                data={"sub": user["username"], "user_id": user["user_id"]}
+            )
 
-        return TokenResponse(
-            access_token=access_token,
-            token_type="bearer",
-            username=user["username"],
-            user_id=user["user_id"],
-            registration_complete=True
-        )
+            return TokenResponse(
+                access_token=access_token,
+                token_type="bearer",
+                username=user["username"],
+                user_id=user["user_id"],
+                registration_complete=True
+            )
+        else:
+            # User exists but hasn't completed registration
+            # Return token but with registration_complete=False
+            access_token = create_access_token(
+                data={"sub": user["user_id"], "user_id": user["user_id"]}
+            )
+
+            return TokenResponse(
+                access_token=access_token,
+                token_type="bearer",
+                user_id=user["user_id"],
+                registration_complete=False
+            )
     else:
         # New user, create temporary user with registration_complete=False
         user_id = str(uuid.uuid4())
