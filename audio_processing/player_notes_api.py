@@ -853,51 +853,252 @@ async def get_player_statistics(player_id: str, user_id: str = Header(None)):
         
 @router.post("/analyze-recent-notes")
 async def analyze_recent_notes(user_id: str = Header(None), limit: int = 10):
-    """Analyze the most recent notes for comprehensive player insights"""
+    """
+    Analyze the most recent notes for a user.
+    
+    This will:
+    1. Get the most recent notes for a user
+    2. For each note, run the player analysis if it hasn't been run already
+    
+    Returns:
+    - A list of notes with their analysis status
+    """
     try:
         if not user_id:
-            raise HTTPException(status_code=400, detail="User ID is required in the header")
-            
-        # Get notes without player notes
+            raise HTTPException(status_code=400, detail="User ID is required")
+        
+        # Get the most recent notes for the user
         pipeline = [
             {"$match": {"user_id": user_id}},
-            {"$lookup": {
-                "from": "players_notes",
-                "localField": "_id",
-                "foreignField": "note_id",
-                "as": "player_notes"
-            }},
-            {"$match": {"player_notes": {"$size": 0}}},  # Notes with no player notes
             {"$sort": {"createdAt": -1}},
             {"$limit": limit}
         ]
         
         notes = await notes_collection.aggregate(pipeline).to_list(length=limit)
+        results = []
         
-        if not notes:
-            return {
-                "success": True,
-                "message": "No notes found that need analysis",
-                "notes_analyzed": 0
-            }
-            
-        # Start analysis for each note
-        analysis_tasks = []
         for note in notes:
-            analysis_tasks.append(analyze_players_in_note(str(note["_id"]), user_id))
+            note_id = str(note["_id"])
             
-        # Wait for all analyses to complete
-        results = await asyncio.gather(*analysis_tasks)
-        
-        # Count successful analyses
-        successful = sum(1 for result in results if result.get("success", False))
+            # Check if this note has already been analyzed
+            player_notes = await players_notes_collection.find({"note_id": note["_id"]}).to_list(length=100)
+            is_analyzed = len(player_notes) > 0
+            
+            if not is_analyzed:
+                # Analyze the note
+                try:
+                    await analyze_players_in_note(note_id, user_id)
+                    results.append({
+                        "note_id": note_id,
+                        "is_analyzed": True,
+                        "message": "Analysis completed successfully"
+                    })
+                except Exception as e:
+                    results.append({
+                        "note_id": note_id,
+                        "is_analyzed": False,
+                        "message": f"Error analyzing note: {str(e)}"
+                    })
+            else:
+                results.append({
+                    "note_id": note_id,
+                    "is_analyzed": True,
+                    "message": "Note was already analyzed"
+                })
         
         return {
             "success": True,
-            "message": f"Analysis complete for {successful} out of {len(notes)} notes",
-            "notes_analyzed": successful
+            "analyzed_notes": results
         }
         
     except Exception as e:
-        print(f"[ANALYSIS] Error analyzing recent notes: {e}")
-        raise HTTPException(status_code=500, detail=str(e)) 
+        print(f"Error analyzing recent notes: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/notes/user")
+async def delete_all_user_notes(user_id: str = Header(None)):
+    """
+    Delete all notes and their associated player notes for a specific user.
+    
+    This will:
+    1. Delete all records from the notes collection for the user
+    2. Delete all records from the players_notes collection that reference those notes
+    
+    Returns:
+    - Success message with counts of deleted notes
+    """
+    try:
+        if not user_id:
+            raise HTTPException(status_code=400, detail="User ID is required")
+        
+        # Get all note IDs for this user
+        user_notes = await notes_collection.find({"user_id": user_id}).to_list(length=1000)
+        note_ids = [note["_id"] for note in user_notes]
+        
+        # Delete all player notes associated with these notes
+        player_notes_delete_result = await players_notes_collection.delete_many({
+            "user_id": user_id,
+            "note_id": {"$in": note_ids}
+        })
+        
+        # Delete all notes for this user
+        notes_delete_result = await notes_collection.delete_many({
+            "user_id": user_id
+        })
+        
+        # Update player documents to remove references to deleted notes
+        # This is a more complex operation, but we'll do a basic cleanup
+        await players_collection.update_many(
+            {"user_id": user_id},
+            {"$pull": {"notes": {"note_id": {"$in": [str(note_id) for note_id in note_ids]}}}}
+        )
+        
+        return {
+            "success": True,
+            "message": "All notes and associated player notes deleted successfully",
+            "notes_deleted_count": notes_delete_result.deleted_count,
+            "player_notes_deleted_count": player_notes_delete_result.deleted_count
+        }
+    
+    except Exception as e:
+        print(f"[DELETE] Error deleting all user notes: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete all user notes: {str(e)}")
+
+@router.delete("/notes/{note_id}")
+async def delete_specific_note(note_id: str, user_id: str = Header(None)):
+    """
+    Delete a specific note and its associated player notes.
+    
+    This will:
+    1. Delete the note from the notes collection
+    2. Delete all player notes that reference this note
+    3. Update player documents to remove references to this note
+    
+    Returns:
+    - Success message with counts of deleted notes
+    """
+    try:
+        if not user_id:
+            raise HTTPException(status_code=400, detail="User ID is required")
+        
+        # Validate note_id format
+        try:
+            note_obj_id = ObjectId(note_id)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid note ID format")
+        
+        # Check if note exists and belongs to user
+        note = await notes_collection.find_one({"_id": note_obj_id, "user_id": user_id})
+        if not note:
+            raise HTTPException(status_code=404, detail="Note not found or does not belong to this user")
+        
+        # Delete all player notes associated with this note
+        player_notes_delete_result = await players_notes_collection.delete_many({
+            "note_id": note_obj_id,
+            "user_id": user_id
+        })
+        
+        # Delete the note
+        note_delete_result = await notes_collection.delete_one({
+            "_id": note_obj_id,
+            "user_id": user_id
+        })
+        
+        # Update player documents to remove references to this note
+        await players_collection.update_many(
+            {"user_id": user_id},
+            {"$pull": {"notes": {"note_id": note_id}}}
+        )
+        
+        return {
+            "success": True,
+            "message": f"Note and associated player notes deleted successfully",
+            "note_deleted": note_delete_result.deleted_count > 0,
+            "player_notes_deleted_count": player_notes_delete_result.deleted_count
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[DELETE] Error deleting note: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete note: {str(e)}")
+
+@router.delete("/notes/{note_id}/note-only")
+async def delete_note_only(note_id: str, user_id: str = Header(None)):
+    """
+    Delete a specific note WITHOUT deleting its associated player notes.
+    
+    This will:
+    1. Delete ONLY the note from the notes collection
+    2. Leave all player notes and player references intact
+    
+    This is useful when you want to remove a note but keep the player analysis data.
+    
+    Returns:
+    - Success message confirming note deletion
+    """
+    try:
+        if not user_id:
+            raise HTTPException(status_code=400, detail="User ID is required")
+        
+        # Validate note_id format
+        try:
+            note_obj_id = ObjectId(note_id)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid note ID format")
+        
+        # Check if note exists and belongs to user
+        note = await notes_collection.find_one({"_id": note_obj_id, "user_id": user_id})
+        if not note:
+            raise HTTPException(status_code=404, detail="Note not found or does not belong to this user")
+        
+        # Delete ONLY the note itself
+        note_delete_result = await notes_collection.delete_one({
+            "_id": note_obj_id,
+            "user_id": user_id
+        })
+        
+        return {
+            "success": True,
+            "message": f"Note deleted successfully (player notes preserved)",
+            "note_deleted": note_delete_result.deleted_count > 0
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[DELETE] Error deleting note only: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete note: {str(e)}")
+
+@router.delete("/notes/user/notes-only")
+async def delete_all_user_notes_only(user_id: str = Header(None)):
+    """
+    Delete all notes for a specific user WITHOUT deleting any associated player notes.
+    
+    This will:
+    1. Delete ONLY the notes from the notes collection
+    2. Leave all player notes and player references intact
+    
+    This is useful when you want to clear a user's note history but preserve all player analysis data.
+    
+    Returns:
+    - Success message with count of deleted notes
+    """
+    try:
+        if not user_id:
+            raise HTTPException(status_code=400, detail="User ID is required")
+        
+        # Delete all notes for this user
+        notes_delete_result = await notes_collection.delete_many({
+            "user_id": user_id
+        })
+        
+        return {
+            "success": True,
+            "message": "All notes deleted successfully (player notes preserved)",
+            "notes_deleted_count": notes_delete_result.deleted_count
+        }
+    
+    except Exception as e:
+        print(f"[DELETE] Error deleting all user notes only: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete all user notes: {str(e)}") 
