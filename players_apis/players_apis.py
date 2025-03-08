@@ -6,9 +6,14 @@ from bson import ObjectId
 from datetime import datetime
 import os
 from dotenv import load_dotenv
+from pydantic import BaseModel
 
 # Load environment variables
 load_dotenv()
+
+# Create a Pydantic model for the player name update
+class PlayerNameUpdate(BaseModel):
+    name: str
 
 router = APIRouter(tags=["players"])
 
@@ -135,4 +140,63 @@ async def get_player_details_with_notes(player_id: str, user_id: str = Header(No
         raise he
     except Exception as e:
         print(f"Error retrieving player details: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.put("/players/{player_id}/update-name", response_model=Dict[str, Any])
+async def update_player_name(player_id: str, player_update: PlayerNameUpdate, user_id: str = Header(None)):
+    """
+    Update a player's name.
+    
+    Parameters:
+    - player_id: The ID of the player to update
+    - player_update: The new name for the player
+    - user_id: The ID of the user who owns the player (from header)
+    
+    Returns:
+    - The updated player document
+    """
+    try:
+        if not user_id:
+            raise HTTPException(status_code=400, detail="User ID is required in the header")
+
+        # Convert string ID to ObjectId
+        try:
+            player_object_id = ObjectId(player_id)
+        except:
+            raise HTTPException(status_code=400, detail="Invalid player ID format")
+
+        # Get the player document to verify it exists and belongs to the user
+        player = await players_collection.find_one({"_id": player_object_id, "user_id": user_id})
+        
+        if not player:
+            raise HTTPException(status_code=404, detail="Player not found or does not belong to this user")
+        
+        # Update the player's name and update timestamp
+        update_result = await players_collection.update_one(
+            {"_id": player_object_id, "user_id": user_id},
+            {"$set": {
+                "name": player_update.name,
+                "updatedAt": datetime.utcnow()
+            }}
+        )
+        
+        if update_result.modified_count == 0:
+            raise HTTPException(status_code=400, detail="Player name update failed")
+            
+        # Get the updated player document
+        updated_player = await players_collection.find_one({"_id": player_object_id, "user_id": user_id})
+        
+        # Serialize player ObjectIds to strings
+        player_serialized = {k: serialize_object_id(v) for k, v in updated_player.items()}
+        
+        return {
+            "success": True,
+            "message": "Player name updated successfully",
+            "player": player_serialized
+        }
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"Error updating player name: {e}")
         raise HTTPException(status_code=500, detail=str(e))
