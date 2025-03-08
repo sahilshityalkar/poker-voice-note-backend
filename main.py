@@ -18,6 +18,7 @@ from audio_processing.player_notes_api import router as player_notes_router  # I
 from audio_processing.player_analysis_api import router as player_analysis_router  # Import for player analysis
 from players_apis.players_apis import router as players_apis_router  # Import for players APIs
 from players_apis.player_analysis_get_apis import router as player_analysis_get_router  # Import for player analysis get APIs
+from players_apis.player_delete_apis import router as player_delete_router  # Import for player delete APIs
 # Remove all hand-related imports and players_apis
 
 # Load environment variables
@@ -45,6 +46,7 @@ app.include_router(player_notes_router, prefix="/player-notes", tags=["player-no
 app.include_router(player_analysis_router, tags=["player-analysis"])  # No prefix because it's already defined in the router
 app.include_router(players_apis_router, prefix="/players-api", tags=["players"])  # New players APIs
 app.include_router(player_analysis_get_router, prefix="/player-analysis", tags=["player-analysis"])  # Player analysis get APIs
+app.include_router(player_delete_router, tags=["player-delete"])  # Player delete APIs
 
 # Initialize OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
