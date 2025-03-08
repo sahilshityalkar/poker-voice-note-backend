@@ -246,9 +246,13 @@ async def create_or_update_player(user_id, player_name, player_data=None):
                     }
                 }
                 
-                # Add other fields from player_data
+                # Add other fields from player_data - EXCLUDE analysis-specific fields
+                # that should only be in player_notes collection
+                excluded_fields = ["_id", "user_id", "name", "notes", "note_id", "player_note_id", 
+                                 "description_text", "description_html", "playername"]
+                
                 for key, value in player_data.items():
-                    if key not in ["_id", "user_id", "name", "notes"]:
+                    if key not in excluded_fields:
                         update_data["$set"][key] = value
                 
                 # Add the note ID to the notes array if it's not already present
@@ -287,9 +291,13 @@ async def create_or_update_player(user_id, player_name, player_data=None):
                         "player_note_id": str(player_data["player_note_id"])
                     })
                 
-                # Add other fields from player_data
+                # Add other fields from player_data - EXCLUDE analysis-specific fields
+                # that should only be in player_notes collection
+                excluded_fields = ["_id", "user_id", "name", "notes", "note_id", "player_note_id", 
+                                 "description_text", "description_html", "playername"]
+                
                 for key, value in player_data.items():
-                    if key not in ["_id", "user_id", "name", "notes", "note_id", "player_note_id"]:
+                    if key not in excluded_fields:
                         new_player[key] = value
             
             # Verify one last time that we don't already have this player with different case
