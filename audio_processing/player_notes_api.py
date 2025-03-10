@@ -119,8 +119,10 @@ async def migrate_fix_player_notes_structure():
         print(f"[MIGRATION] Error fixing player notes structure: {e}")
         print(f"[MIGRATION] Traceback: {traceback.format_exc()}")
 
-# Create indexes on startup
-asyncio.create_task(ensure_indexes())
+# Instead of calling asyncio.create_task directly, create a setup function
+# that can be called from FastAPI startup event
+async def setup_indexes():
+    await ensure_indexes()
 
 # Player analysis prompt template
 PLAYER_ANALYSIS_PROMPT = """

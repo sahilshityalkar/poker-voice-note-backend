@@ -11,3 +11,4 @@ pyjwt
 motor
 email-validator
 celery
+nest_asyncio

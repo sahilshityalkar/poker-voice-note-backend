@@ -244,7 +244,7 @@ async def upload_audio(
     file: UploadFile = File(...),
     user_id: str = Header(None)
 ):
-    """Upload audio file and process it"""
+    """Upload audio file and process it asynchronously using Celery"""
     try:
         if not user_id:
             raise HTTPException(status_code=400, detail="User ID is required")
@@ -269,14 +269,32 @@ async def upload_audio(
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
-        # Process the audio file
-        result = await process_audio_file(Path(file_path), file.content_type, user_id)
+        # Queue the audio processing task to Celery
+        # Import task locally to prevent circular imports
+        import sys
+        print(f"[DEBUG] Python path: {sys.path}")
         
-        return {
-            "success": True,
-            "message": "Audio processed successfully",
-            "data": result
-        }
+        try:
+            from tasks.audio_tasks import process_audio_task
+            task = process_audio_task.delay(file_path, file.content_type, user_id)
+            
+            return {
+                "success": True,
+                "message": "Audio file uploaded successfully. Processing started in background.",
+                "task_id": task.id,
+                "file_id": unique_filename
+            }
+        except ImportError as import_error:
+            print(f"[ERROR] Import error in upload_audio: {import_error}")
+            # Fallback to direct processing if Celery task import fails
+            print(f"[UPLOAD] Falling back to direct processing for {file_path}")
+            result = await process_audio_file(Path(file_path), file.content_type, user_id)
+            
+            return {
+                "success": True,
+                "message": "Audio processed directly (Celery unavailable)",
+                "data": result
+            }
             
     except Exception as e:
         print(f"[ERROR] Error uploading audio: {e}")
@@ -594,3 +612,34 @@ async def update_transcript(
     except Exception as e:
         print(f"[UPDATE] Error updating transcript: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/task-status/{task_id}")
+async def get_task_status(task_id: str):
+    """Check the status of an audio processing task"""
+    try:
+        from celery.result import AsyncResult
+        
+        # Get task result
+        result = AsyncResult(task_id)
+        
+        # Return status information
+        response = {
+            "task_id": task_id,
+            "status": result.status,
+        }
+        
+        # If task is ready, include result information
+        if result.ready():
+            if result.successful():
+                response["result"] = result.get()
+            else:
+                response["error"] = str(result.result)
+                
+        return response
+        
+    except Exception as e:
+        print(f"[ERROR] Error checking task status: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
