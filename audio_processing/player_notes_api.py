@@ -13,6 +13,15 @@ import traceback
 import re
 import logging
 from pymongo import TEXT, ASCENDING
+import sys
+
+# Add parent directory to path to allow imports
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
+# Import the get_database_connection function
+from database import get_database_connection
 
 # Define the logger
 logger = logging.getLogger(__name__)
@@ -22,9 +31,10 @@ load_dotenv()
 
 router = APIRouter()
 
-# MongoDB setup
+# MongoDB setup - Use the new connection function
 MONGODB_URL = os.getenv("DATABASE_URL")
-client = AsyncIOMotorClient(MONGODB_URL)
+# Create a fresh connection with the current event loop
+client = get_database_connection()
 db = client.pokernotes
 
 # Collections
@@ -34,6 +44,33 @@ players_notes_collection = db.players_notes
 
 # Export collections for direct import
 __all__ = ['players_collection', 'notes_collection', 'players_notes_collection', 'db']
+
+# Function to get a fresh database connection with the current event loop
+def get_fresh_connection():
+    """Get a fresh database connection with the current event loop"""
+    try:
+        # Get a fresh connection
+        fresh_client = get_database_connection()
+        fresh_db = fresh_client.pokernotes
+        
+        # Return updated collections
+        return {
+            'client': fresh_client,
+            'db': fresh_db,
+            'players': fresh_db.players,
+            'notes': fresh_db.notes,
+            'players_notes': fresh_db.players_notes
+        }
+    except Exception as e:
+        print(f"[DB] Error getting fresh connection: {e}")
+        # Fall back to existing connection
+        return {
+            'client': client,
+            'db': db,
+            'players': players_collection,
+            'notes': notes_collection,
+            'players_notes': players_notes_collection
+        }
 
 # Set up indexes for better performance
 async def ensure_indexes():
@@ -217,123 +254,87 @@ async def get_available_players(user_id: str) -> List[Dict[str, str]]:
         print(f"Error getting available players: {e}")
         return []
 
-async def create_or_update_player(user_id, player_name, player_data=None):
-    """Create a new player or update an existing one."""
+async def create_or_update_player(user_id, player_name, player_data=None, custom_collection=None):
+    """
+    Create a new player if it doesn't exist or update an existing one
+    
+    Args:
+        user_id: User ID
+        player_name: Player name to create or update
+        player_data: Optional additional player data
+        custom_collection: Optional custom players collection to use (for fresh connections)
+    
+    Returns:
+        Tuple of (player_id, is_new) where is_new is True if player was created, False if updated
+    """
     try:
+        # Use the provided collection or fall back to global
+        p_collection = custom_collection if custom_collection is not None else players_collection
+        
+        # Clean player name
+        player_name = player_name.strip()
         if not player_name:
-            print("[PLAYER] Skipping player with empty name")
-            return None, None
+            print(f"[PLAYER] Invalid player name: {player_name}")
+            return None, False
             
-        # First try to find an exact match
-        existing_player = await players_collection.find_one({
+        # Try to find the player by name
+        existing_player = await p_collection.find_one({
             "user_id": user_id,
-            "name": player_name
+            "name": {"$regex": f"^{re.escape(player_name)}$", "$options": "i"}
         })
         
-        # If no exact match, try case-insensitive match
-        if not existing_player:
-            all_user_players = await players_collection.find({"user_id": user_id}).to_list(length=None)
-            
-            # Manual case-insensitive matching in Python
-            player_name_lower = player_name.lower()
-            for player in all_user_players:
-                if player.get("name", "").lower() == player_name_lower:
-                    existing_player = player
-                    break
+        is_new = False
+        current_time = datetime.utcnow()
         
         if existing_player:
-            print(f"[PLAYER] Updating existing player: {player_name}")
+            # Update existing player
+            player_id = existing_player["_id"]
+            print(f"[PLAYER] Updating existing player: {player_name} ({player_id})")
             
-            # Update fields if player_data is provided
-            if player_data:
-                update_data = {
-                    "$set": {
-                        "updated_at": datetime.now()
-                    }
-                }
-                
-                # Add other fields from player_data - EXCLUDE analysis-specific fields
-                # that should only be in player_notes collection
-                excluded_fields = ["_id", "user_id", "name", "notes", "note_id", "player_note_id", 
-                                 "description_text", "description_html", "playername"]
-                
-                for key, value in player_data.items():
-                    if key not in excluded_fields:
-                        update_data["$set"][key] = value
-                
-                # Add the note ID to the notes array if it's not already present
-                if "note_id" in player_data and "player_note_id" in player_data:
-                    update_data["$addToSet"] = {
-                        "notes": {
-                            "note_id": str(player_data["note_id"]), 
-                            "player_note_id": str(player_data["player_note_id"])
-                        }
-                    }
-                
-                result = await players_collection.update_one(
-                    {"_id": existing_player["_id"]},
-                    update_data
-                )
-                
-                return existing_player["_id"], True
-            
-            return existing_player["_id"], False
-        else:
-            print(f"[PLAYER] Creating new player: {player_name}")
-            # Create new player document
-            new_player = {
-                "user_id": user_id,
-                "name": player_name,
-                "notes": [],
-                "created_at": datetime.now(),
-                "updated_at": datetime.now()
+            # Default update data
+            update_data = {
+                "updated_at": current_time
             }
             
-            # Add player_data fields if provided
+            # Add any additional player data
             if player_data:
-                if "note_id" in player_data and "player_note_id" in player_data:
-                    new_player["notes"].append({
-                        "note_id": str(player_data["note_id"]),
-                        "player_note_id": str(player_data["player_note_id"])
-                    })
-                
-                # Add other fields from player_data - EXCLUDE analysis-specific fields
-                # that should only be in player_notes collection
-                excluded_fields = ["_id", "user_id", "name", "notes", "note_id", "player_note_id", 
-                                 "description_text", "description_html", "playername"]
-                
                 for key, value in player_data.items():
-                    if key not in excluded_fields:
-                        new_player[key] = value
+                    if key not in ["_id", "user_id", "name", "created_at"]:
+                        update_data[key] = value
             
-            # Verify one last time that we don't already have this player with different case
-            player_name_lower = player_name.lower()
-            existing_players = await players_collection.find({"user_id": user_id}).to_list(length=None)
-            for existing in existing_players:
-                if existing.get("name", "").lower() == player_name_lower:
-                    # We found a match, so use that player instead of creating a new one
-                    print(f"[PLAYER] Found existing player with different case: {existing['name']}")
-                    
-                    # Update notes if needed
-                    if player_data and "note_id" in player_data and "player_note_id" in player_data:
-                        await players_collection.update_one(
-                            {"_id": existing["_id"]},
-                            {"$addToSet": {
-                                "notes": {
-                                    "note_id": str(player_data["note_id"]),
-                                    "player_note_id": str(player_data["player_note_id"])
-                                }
-                            }}
-                        )
-                    
-                    return existing["_id"], True
+            # Update the player
+            await p_collection.update_one(
+                {"_id": player_id},
+                {"$set": update_data}
+            )
+        else:
+            # Create new player
+            is_new = True
+            print(f"[PLAYER] Creating new player: {player_name}")
             
-            # If we reach here, it's safe to insert the new player
-            result = await players_collection.insert_one(new_player)
-            return result.inserted_id, True
-    
+            # Default player document
+            player_doc = {
+                "user_id": user_id,
+                "name": player_name,
+                "created_at": current_time,
+                "updated_at": current_time,
+                "notes": []
+            }
+            
+            # Add any additional player data
+            if player_data:
+                for key, value in player_data.items():
+                    if key not in ["_id", "user_id", "name", "created_at"]:
+                        player_doc[key] = value
+            
+            # Insert the player
+            result = await p_collection.insert_one(player_doc)
+            player_id = result.inserted_id
+            
+        return player_id, is_new
     except Exception as e:
-        print(f"[PLAYER] Error in create_or_update_player: {str(e)}")
+        print(f"[PLAYER] Error in create_or_update_player: {e}")
+        traceback.print_exc()
         print(f"[PLAYER] Traceback: {traceback.format_exc()}")
         return None, False
 
@@ -395,21 +396,29 @@ async def analyze_players_in_note(note_id: str, user_id: str, retry_count: int =
         # Log start of player analysis
         print(f"[PLAYERS] Starting player analysis for note {note_id} (is_update={is_update})")
         
+        # Get fresh database connections for this operation
+        print(f"[PLAYERS] Getting fresh database connections for note {note_id}")
+        conn = get_fresh_connection()
+        p_collection = conn['players']
+        pn_collection = conn['players_notes']
+        n_collection = conn['notes']
+        fresh_db = conn['db']
+        
         # If this is an update, verify cleanup was done
         if is_update:
             # Double check that there are no existing player notes for this note
-            existing_notes = await players_notes_collection.count_documents({"note_id": note_id})
+            existing_notes = await pn_collection.count_documents({"note_id": note_id})
             if existing_notes > 0:
                 print(f"[PLAYERS] WARNING: Found {existing_notes} player notes for note {note_id} - should be 0 in update mode!")
                 print(f"[PLAYERS] Ensuring cleanup of existing player notes")
                 try:
                     # Emergency cleanup - should've been done already but just in case
-                    await players_notes_collection.delete_many({"note_id": note_id})
+                    await pn_collection.delete_many({"note_id": note_id})
                     
                     # Also check for any players still referencing this note
-                    players_with_refs = await players_collection.find({"notes.note_id": note_id}).to_list(length=100)
+                    players_with_refs = await p_collection.find({"notes.note_id": note_id}).to_list(length=100)
                     for player in players_with_refs:
-                        await players_collection.update_one(
+                        await p_collection.update_one(
                             {"_id": player["_id"]},
                             {"$pull": {"notes": {"note_id": note_id}}}
                         )
@@ -420,7 +429,7 @@ async def analyze_players_in_note(note_id: str, user_id: str, retry_count: int =
         # Get the note
         note_obj_id = ObjectId(note_id)
         # Try to find the note with the user_id as is (UUID format)
-        note = await notes_collection.find_one({"_id": note_obj_id, "user_id": user_id})
+        note = await n_collection.find_one({"_id": note_obj_id, "user_id": user_id})
         
         # If not found, try with ObjectId conversion as fallback (for backward compatibility)
         if not note:
@@ -441,7 +450,7 @@ async def analyze_players_in_note(note_id: str, user_id: str, retry_count: int =
             return {"success": False, "message": "No transcript found in note"}
             
         # Get the user's language preference
-        user = await db.users.find_one({"user_id": user_id})
+        user = await fresh_db.users.find_one({"user_id": user_id})
         language = user.get("notes_language", "en") if user else "en"
         print(f"[ANALYSIS] Using language {language} for player analysis")
         
@@ -554,6 +563,12 @@ async def process_players_analysis(result: Dict, note_id: str, user_id: str, tra
     # Now process each player from the analysis
     player_notes = []
 
+    # Get fresh connections for this operation
+    print(f"[ANALYSIS] Getting fresh database connections for note {note_id}")
+    conn = get_fresh_connection()
+    p_collection = conn['players']
+    pn_collection = conn['players_notes']
+    
     # If this is an update, ensure all player references are properly deleted first
     # We're adding this as a double-check since the deletion in update_transcript_directly sometimes might not be complete
     if is_update:
@@ -561,12 +576,12 @@ async def process_players_analysis(result: Dict, note_id: str, user_id: str, tra
             print(f"[ANALYSIS] Double-checking cleanup for note {note_id} (update mode)")
             
             # First ensure all player notes for this note are deleted
-            delete_result = await players_notes_collection.delete_many({"note_id": note_id})
+            delete_result = await pn_collection.delete_many({"note_id": note_id})
             print(f"[ANALYSIS] Deleted {delete_result.deleted_count} lingering player notes during double-check")
             
             # Also ensure all player references to this note are removed
             # Find players with references to this note
-            players_with_refs = await players_collection.find(
+            players_with_refs = await p_collection.find(
                 {"notes.note_id": note_id}
             ).to_list(length=100)
             
@@ -575,7 +590,7 @@ async def process_players_analysis(result: Dict, note_id: str, user_id: str, tra
                 for player in players_with_refs:
                     try:
                         # Remove references to this note from each player
-                        await players_collection.update_one(
+                        await p_collection.update_one(
                             {"_id": player["_id"]},
                             {"$pull": {"notes": {"note_id": note_id}}}
                         )
@@ -608,12 +623,12 @@ async def process_players_analysis(result: Dict, note_id: str, user_id: str, tra
             if is_update:
                 # In update mode, we always create new player records
                 print(f"[PLAYER] Creating new player: {player_name}")
-                player_result = await create_or_update_player(user_id, player_name)
+                player_result = await create_or_update_player(user_id, player_name, custom_collection=p_collection)
                 # Extract just the player_id from the tuple (player_id, is_new)
                 player_id = player_result[0] if player_result and player_result[0] else None
             else:
                 # Try to match to an existing player by name
-                existing_players = await players_collection.find({"user_id": user_id, "name": {"$regex": f"^{re.escape(player_name)}$", "$options": "i"}}).to_list(length=1)
+                existing_players = await p_collection.find({"user_id": user_id, "name": {"$regex": f"^{re.escape(player_name)}$", "$options": "i"}}).to_list(length=1)
                 
                 if existing_players:
                     matched_player = existing_players[0]
@@ -623,7 +638,7 @@ async def process_players_analysis(result: Dict, note_id: str, user_id: str, tra
                 else:
                     # Create new player
                     print(f"[PLAYER] Creating new player: {player_name}")
-                    player_result = await create_or_update_player(user_id, player_name)
+                    player_result = await create_or_update_player(user_id, player_name, custom_collection=p_collection)
                     # Extract just the player_id from the tuple (player_id, is_new)
                     player_id = player_result[0] if player_result and player_result[0] else None
             
@@ -643,7 +658,7 @@ async def process_players_analysis(result: Dict, note_id: str, user_id: str, tra
             }
             
             # Insert the player note
-            player_note_result = await players_notes_collection.insert_one(player_note_doc)
+            player_note_result = await pn_collection.insert_one(player_note_doc)
             player_note_id = player_note_result.inserted_id
             print(f"[ANALYSIS] Created player note with ID: {player_note_id}")
             
@@ -655,7 +670,7 @@ async def process_players_analysis(result: Dict, note_id: str, user_id: str, tra
             }
             
             # Use the correct ObjectId for the player update
-            await players_collection.update_one(
+            await p_collection.update_one(
                 {"_id": player_id},  # player_id is already an ObjectId
                 {"$push": {"notes": note_ref}}
             )

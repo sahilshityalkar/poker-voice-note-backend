@@ -26,18 +26,8 @@ except Exception as nest_error:
 
 @app.task(bind=True, name="update_transcript_task")
 def update_transcript_task(self, note_id: str, text: str, user_id: str) -> Dict[str, Any]:
-    """
-    Celery task to update a note's transcript and reprocess all data
+    """Celery task to update a note's transcript and reprocess all data"""
     
-    Args:
-        self: Task instance
-        note_id: ObjectId of the note to update
-        text: New transcript text
-        user_id: User ID who owns the note
-        
-    Returns:
-        Dict with the result of the operation
-    """
     print(f"[TASK] Starting transcript update task for note: {note_id}")
     
     # Update task state to STARTED
@@ -49,102 +39,38 @@ def update_transcript_task(self, note_id: str, text: str, user_id: str) -> Dict[
     })
     
     try:
-        # Make sure nest_asyncio is applied
-        try:
-            import nest_asyncio
-            nest_asyncio.apply()
-            print("[TASK] Applied nest_asyncio for this task")
-        except ImportError:
-            print("[TASK] nest_asyncio not available, proceeding with caution")
-        except Exception as nest_err:
-            print(f"[TASK] Error applying nest_asyncio: {nest_err}")
+        # Create a completely isolated event loop and process
+        result = execute_in_isolated_process(note_id, text, user_id)
         
-        # Use a persistent loop variable to avoid "Event loop is closed" errors
-        loop = None
-        
-        # Create the async function that contains all the processing work
-        async def process_transcript_update():
-            # Import here to avoid circular imports
-            from audio_processing.audio_api import update_transcript_directly
-            
-            # Run the update function and return the result
-            try:
-                result = await update_transcript_directly(note_id, text, user_id)
-                return result
-            except Exception as e:
-                print(f"[TASK] Error in update_transcript_directly: {str(e)}")
-                return {
-                    "success": False,
-                    "error": str(e),
-                    "message": "Error updating transcript"
-                }
-        
-        # Create a new event loop - more robust approach
-        try:
-            # Check if there's an existing event loop that's running
-            try:
-                existing_loop = asyncio.get_event_loop()
-                if existing_loop.is_running():
-                    print("[TASK] Using existing running event loop")
-                    loop = existing_loop
-                else:
-                    print("[TASK] Creating new event loop (existing one not running)")
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-            except RuntimeError:
-                # No event loop exists in this thread
-                print("[TASK] No event loop exists, creating new one")
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            
-            # Run the async function in the loop
-            print("[TASK] Running async function in loop")
-            result = loop.run_until_complete(process_transcript_update())
-            
-            # If processing succeeded
-            if result.get("success", False):
-                self.update_state(state='SUCCESS', meta={
-                    'message': 'Transcript update completed successfully',
-                    'note_id': note_id,
-                    'transcript': text[:100] + "..." if len(text) > 100 else text,
-                    'summary': result.get('summary', '')[:100] + "..." if result.get('summary', '') and len(result.get('summary', '')) > 100 else result.get('summary', ''),
-                    'players_count': len(result.get('player_notes', [])),
-                    'progress': 100
-                })
-                print(f"[TASK] Transcript update completed for note: {note_id}")
-                return {
-                    'success': True,
-                    'message': 'Transcript update completed successfully',
-                    'data': result
-                }
-            else:
-                # If processing failed but we got an error message
-                error_message = result.get('message', 'Unknown error during transcript update')
-                self.update_state(state='FAILURE', meta={
-                    'message': error_message,
-                    'note_id': note_id,
-                    'error': result.get('error', 'Unknown error')
-                })
-                print(f"[TASK] Transcript update failed for note {note_id}: {error_message}")
-                return {
-                    'success': False,
-                    'message': error_message,
-                    'error': result.get('error', 'Unknown error')
-                }
-        finally:
-            # Clean up the event loop - ONLY if we created a new one
-            # DO NOT close the loop if it was an existing one
-            if loop and loop is not asyncio.get_event_loop():
-                print("[TASK] Cleaning up new event loop we created")
-                try:
-                    # Only close the loop if we created it
-                    if not loop.is_closed():
-                        loop.close()
-                except Exception as e:
-                    print(f"[TASK] Error closing event loop: {str(e)}")
-            else:
-                print("[TASK] Not closing existing event loop")
-            
+        # Process the result
+        if result.get("success", False):
+            self.update_state(state='SUCCESS', meta={
+                'message': 'Transcript update completed successfully',
+                'note_id': note_id,
+                'transcript': text[:100] + "..." if len(text) > 100 else text,
+                'summary': result.get('summary', '')[:100] + "..." if result.get('summary', '') and len(result.get('summary', '')) > 100 else result.get('summary', ''),
+                'players_count': len(result.get('player_notes', [])),
+                'progress': 100
+            })
+            print(f"[TASK] Transcript update completed for note: {note_id}")
+            return {
+                'success': True,
+                'message': 'Transcript update completed successfully',
+                'data': result
+            }
+        else:
+            error_message = result.get('message', 'Unknown error during transcript update')
+            self.update_state(state='FAILURE', meta={
+                'message': error_message,
+                'note_id': note_id,
+                'error': result.get('error', 'Unknown error')
+            })
+            print(f"[TASK] Transcript update failed for note {note_id}: {error_message}")
+            return {
+                'success': False,
+                'message': error_message,
+                'error': result.get('error', 'Unknown error')
+            }
     except Exception as e:
         error_message = f"Error in transcript update task: {str(e)}"
         self.update_state(state='FAILURE', meta={
@@ -152,8 +78,162 @@ def update_transcript_task(self, note_id: str, text: str, user_id: str) -> Dict[
             'note_id': note_id
         })
         print(f"[TASK] Exception in transcript update task for note {note_id}: {e}")
+        traceback.print_exc()
         return {
             'success': False,
             'message': error_message,
             'error': str(e)
-        } 
+        }
+
+def execute_in_isolated_process(note_id: str, text: str, user_id: str) -> Dict[str, Any]:
+    """Execute the update in a completely isolated process"""
+    
+    # Import here to prevent circular imports
+    from database import get_database_connection
+    from audio_processing.analyze_players_in_note import analyze_players_completely
+    from audio_processing.gpt_analysis import process_transcript
+    
+    # Create a completely fresh event loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    try:
+        print(f"[TASK] Created fresh event loop for note {note_id}")
+        
+        async def isolated_process():
+            try:
+                # Get a fresh database connection with the current event loop
+                db_conn = get_database_connection()
+                
+                # Extract collections
+                db = db_conn.pokernotes
+                notes_coll = db.notes
+                players_coll = db.players
+                players_notes_coll = db.players_notes
+                users_coll = db.users
+                
+                print(f"[TASK] Got fresh database connections for note {note_id}")
+                print(f"[TASK] Database name: {db.name}, Collections available: notes, players, players_notes, users")
+                
+                # Basic validation
+                if not text or not text.strip():
+                    return {
+                        "success": False,
+                        "error": "Empty text",
+                        "message": "No text provided for update",
+                        "player_notes": []
+                    }
+                
+                # Validate note_id
+                try:
+                    note_obj_id = ObjectId(note_id)
+                except Exception as e:
+                    print(f"[TASK] Invalid note ID format: {e}")
+                    return {
+                        "success": False,
+                        "error": "Invalid note ID",
+                        "message": f"Invalid note ID format: {note_id}",
+                        "player_notes": []
+                    }
+                
+                # Find the note
+                note = await notes_coll.find_one({"_id": note_obj_id, "user_id": user_id})
+                if not note:
+                    print(f"[TASK] Note not found: {note_id}")
+                    return {
+                        "success": False,
+                        "error": "Note not found",
+                        "message": "Note not found or you don't have permission to update it",
+                        "player_notes": []
+                    }
+                
+                # Get user language
+                user = await users_coll.find_one({"user_id": user_id})
+                language = user.get("notes_language", "en") if user else "en"
+                print(f"[TASK] Using language {language} for note {note_id}")
+                
+                # Process transcript with GPT
+                print(f"[TASK] Starting GPT analysis for note {note_id}")
+                try:
+                    processed_data = await process_transcript(text, language)
+                except Exception as gpt_ex:
+                    print(f"[TASK] Error in GPT processing: {gpt_ex}")
+                    processed_data = {
+                        "summary": f"Error processing text in {language}",
+                        "insight": "Error during analysis"
+                    }
+                
+                # Extract summary and insight
+                summary = processed_data.get("summary", "")
+                insight = processed_data.get("insight", "")
+                
+                # Update the note document
+                await notes_coll.update_one(
+                    {"_id": note_obj_id},
+                    {"$set": {
+                        "transcript": text,
+                        "summary": summary,
+                        "insight": insight,
+                        "updatedAt": datetime.utcnow()
+                    }}
+                )
+                print(f"[TASK] Updated note {note_id} with new transcript and analysis")
+                
+                # Use our completely isolated player analysis function
+                print(f"[TASK] Starting isolated player analysis for note {note_id}")
+                conn_dict = {
+                    'db': db,
+                    'players': players_coll,
+                    'players_notes': players_notes_coll,
+                    'notes': notes_coll
+                }
+                
+                player_result = await analyze_players_completely(
+                    note_id=note_id,
+                    user_id=user_id,
+                    transcript=text,
+                    language=language,
+                    db_connection=conn_dict
+                )
+                print(f"[TASK] Completed isolated player analysis for note {note_id}")
+                
+                player_notes = player_result.get("player_notes", [])
+                
+                # Return the result
+                return {
+                    "success": True,
+                    "noteId": note_id,
+                    "transcript": text,
+                    "summary": summary,
+                    "insight": insight,
+                    "language": language,
+                    "player_notes": player_notes
+                }
+                
+            except Exception as e:
+                print(f"[TASK] Error in isolated process: {e}")
+                traceback.print_exc()
+                return {
+                    "success": False,
+                    "error": str(e),
+                    "message": f"Error in update process: {str(e)}",
+                    "player_notes": []
+                }
+        
+        # Run the coroutine and get the result
+        result = loop.run_until_complete(isolated_process())
+        return result
+        
+    finally:
+        # Always clean up the event loop
+        try:
+            # Cancel any pending tasks
+            pending_tasks = asyncio.all_tasks(loop)
+            if pending_tasks:
+                loop.run_until_complete(asyncio.gather(*pending_tasks, return_exceptions=True))
+            
+            # Close the loop
+            loop.close()
+            print(f"[TASK] Closed isolated event loop")
+        except Exception as e:
+            print(f"[TASK] Error cleaning up event loop: {e}") 

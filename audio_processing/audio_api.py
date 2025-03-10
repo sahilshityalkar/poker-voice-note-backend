@@ -13,10 +13,11 @@ from bson import ObjectId
 import json
 from pydantic import BaseModel, Field
 import re
+import traceback
 
 # Import the GPT analysis functions
 from audio_processing.gpt_analysis import process_transcript
-from audio_processing.player_notes_api import analyze_players_in_note
+from audio_processing.player_notes_api import analyze_players_in_note, get_fresh_connection
 
 # Load environment variables
 load_dotenv()
@@ -625,6 +626,20 @@ async def get_transcript_from_deepgram_url(audio_url: str, language: str = "en")
 async def update_transcript_directly(note_id: str, text: str, user_id: str) -> Dict[str, Any]:
     """Update a note's transcript and reprocess it directly - used by Celery tasks"""
     try:
+        # Import the get_fresh_connection function
+        from audio_processing.player_notes_api import get_fresh_connection
+        
+        # Import our completely isolated player analysis function
+        from audio_processing.analyze_players_in_note import analyze_players_completely
+        
+        # Get fresh database connections for this task
+        print(f"[UPDATE] Getting fresh database connections for note {note_id}")
+        conn = get_fresh_connection()
+        notes_coll = conn['notes']
+        players_coll = conn['players']
+        players_notes_coll = conn['players_notes']
+        user_coll = conn['db'].users
+        
         if not text or not text.strip():
             return {
                 "success": False,
@@ -649,7 +664,7 @@ async def update_transcript_directly(note_id: str, text: str, user_id: str) -> D
 
         # Find the existing note
         try:
-            note = await notes_collection.find_one({"_id": note_obj_id, "user_id": user_id})
+            note = await notes_coll.find_one({"_id": note_obj_id, "user_id": user_id})
             if not note:
                 print(f"[UPDATE] Note not found: {note_id} for user {user_id}")
                 return {
@@ -671,7 +686,7 @@ async def update_transcript_directly(note_id: str, text: str, user_id: str) -> D
         
         # Get user's language preference
         try:
-            user = await user_collection.find_one({"user_id": user_id})
+            user = await user_coll.find_one({"user_id": user_id})
             if not user:
                 print(f"[UPDATE] User not found: {user_id}")
                 return {
@@ -689,86 +704,9 @@ async def update_transcript_directly(note_id: str, text: str, user_id: str) -> D
             language = "en" # Default to English on error
             print(f"[UPDATE] Defaulting to language: {language}")
 
-        # IMPORTANT: CLEANUP STEP - Delete all existing player notes associated with this note
-        try:
-            # Import the MongoDB collections directly from player_notes_api
-            from audio_processing.player_notes_api import players_notes_collection, players_collection
-            
-            print(f"[UPDATE] Starting COMPLETE player notes cleanup for note {note_id}")
-            
-            # APPROACH 1: Direct database cleanup - Find and delete player notes
-            print(f"[UPDATE] Finding player notes for note {note_id}")
-            existing_player_notes = await players_notes_collection.find({"note_id": note_id}).to_list(length=1000)
-            
-            if existing_player_notes:
-                existing_player_note_ids = [str(note["_id"]) for note in existing_player_notes]
-                existing_player_ids = [note["player_id"] for note in existing_player_notes]
-                
-                print(f"[UPDATE] Found {len(existing_player_notes)} existing player notes to clean up for note {note_id}")
-                print(f"[UPDATE] Player note IDs: {existing_player_note_ids}")
-                print(f"[UPDATE] Player IDs: {existing_player_ids}")
-                
-                # Delete all existing player notes
-                delete_result = await players_notes_collection.delete_many({"note_id": note_id})
-                print(f"[UPDATE] Deleted {delete_result.deleted_count} player notes for note {note_id}")
-                
-                # APPROACH 2: Update player documents to remove this note from their list of notes
-                # Convert player_ids to ObjectIds when needed
-                for player_id in existing_player_ids:
-                    try:
-                        # Ensure player_id is an ObjectId or convert if needed
-                        player_obj_id = ObjectId(player_id) if isinstance(player_id, str) else player_id
-                        
-                        update_result = await players_collection.update_one(
-                            {"_id": player_obj_id},
-                            {"$pull": {"notes": {"note_id": note_id}}}
-                        )
-                        print(f"[UPDATE] Updated player {player_id}, modified: {update_result.modified_count}")
-                    except Exception as player_ex:
-                        print(f"[UPDATE] Error updating player {player_id}: {player_ex}")
-            else:
-                print(f"[UPDATE] No existing player notes found for note {note_id}")
-                
-            # APPROACH 3: Thorough scan for any players still referencing this note
-            # This catches any potential inconsistencies
-            print(f"[UPDATE] Thorough scan for any players still referencing note {note_id}")
-            players_with_refs = await players_collection.find(
-                {"notes.note_id": note_id}
-            ).to_list(length=1000)
-            
-            if players_with_refs:
-                print(f"[UPDATE] Found {len(players_with_refs)} players still referencing note {note_id}")
-                for player in players_with_refs:
-                    try:
-                        print(f"[UPDATE] Cleaning lingering reference from player {player['_id']} (name: {player.get('name', 'unknown')})")
-                        await players_collection.update_one(
-                            {"_id": player["_id"]},
-                            {"$pull": {"notes": {"note_id": note_id}}}
-                        )
-                    except Exception as player_ex:
-                        print(f"[UPDATE] Error cleaning lingering reference from player {player['_id']}: {player_ex}")
-            else:
-                print(f"[UPDATE] No lingering player references found")
-                
-            # Final verification - double check that all player notes are gone
-            final_check = await players_notes_collection.count_documents({"note_id": note_id})
-            if final_check > 0:
-                print(f"[UPDATE] WARNING: Still found {final_check} player notes after cleanup! Attempting final delete.")
-                try:
-                    await players_notes_collection.delete_many({"note_id": note_id})
-                except Exception as final_ex:
-                    print(f"[UPDATE] Error in final player notes deletion: {final_ex}")
-            
-            # Final verification - check that all player references are gone
-            final_ref_check = await players_collection.count_documents({"notes.note_id": note_id})
-            if final_ref_check > 0:
-                print(f"[UPDATE] WARNING: Still found {final_ref_check} player references after cleanup!")
-                
-            print(f"[UPDATE] Player notes cleanup completed for note {note_id}")
-                
-        except Exception as cleanup_ex:
-            print(f"[UPDATE] Error during player notes cleanup: {cleanup_ex}")
-            # Continue with the update process even if cleanup fails
+        # CLEANUP STEP - completely handled by analyze_players_completely now
+        # This is no longer needed, but we'll keep a log message
+        print(f"[UPDATE] Player cleanup will be handled by analyze_players_completely")
 
         # Step 1: Process transcript with GPT in user's language
         try:
@@ -782,13 +720,20 @@ async def update_transcript_directly(note_id: str, text: str, user_id: str) -> D
                 "insight": f"The system encountered an error while analyzing this updated text"
             }
         
-        # Step 2: Start player analysis
+        # Step 2: Use our completely isolated player analysis function
         try:
-            from audio_processing.player_notes_api import analyze_players_in_note
-            print(f"[UPDATE] Starting player analysis")
-            player_analysis_result = await analyze_players_in_note(note_id, user_id, is_update=True)
+            print(f"[UPDATE] Starting player analysis with isolated function")
+            player_analysis_result = await analyze_players_completely(
+                note_id=note_id, 
+                user_id=user_id, 
+                transcript=text, 
+                language=language, 
+                db_connection=conn
+            )
+            print(f"[UPDATE] Completed isolated player analysis")
         except Exception as player_ex:
-            print(f"[UPDATE] Error in player analysis: {player_ex}")
+            print(f"[UPDATE] Error in isolated player analysis: {player_ex}")
+            traceback.print_exc()
             player_analysis_result = {
                 "success": False,
                 "message": f"Error analyzing players: {str(player_ex)}",
@@ -816,7 +761,7 @@ async def update_transcript_directly(note_id: str, text: str, user_id: str) -> D
                 "updatedAt": datetime.utcnow()
             }
             
-            await notes_collection.update_one(
+            await notes_coll.update_one(
                 {"_id": note_obj_id},
                 {"$set": update_data}
             )
@@ -865,6 +810,7 @@ async def update_transcript_directly(note_id: str, text: str, user_id: str) -> D
         }
     except Exception as e:
         print(f"[UPDATE] Error updating transcript directly: {e}")
+        traceback.print_exc()
         return {
             "success": False,
             "error": str(e),
