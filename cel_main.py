@@ -17,7 +17,7 @@ app = Celery('cel_main',
              backend='rpc://')  # Using RPC for result backend
 
 # Include tasks packages
-app.conf.imports = ['tasks.audio_tasks', 'tasks.text_tasks']
+app.conf.imports = ['tasks.audio_tasks', 'tasks.text_tasks', 'tasks.transcript_update_tasks']
 
 # Configure Celery
 app.conf.update(
