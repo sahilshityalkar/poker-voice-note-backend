@@ -12,6 +12,7 @@ from .gpt_analysis import get_gpt_response
 import traceback
 import re
 import logging
+from pymongo import TEXT, ASCENDING
 
 # Define the logger
 logger = logging.getLogger(__name__)
@@ -40,11 +41,11 @@ async def ensure_indexes():
         print("[DB] Created text index on description_text in player_notes collection")
         
         # Create index on user_id and player_id in player_notes collection
-        await players_notes_collection.create_index([("user_id", 1), ("player_id", 1)])
+        await players_notes_collection.create_index([("user_id", ASCENDING), ("player_id", ASCENDING)])
         print("[DB] Created index on user_id and player_id in player_notes collection")
         
         # Create index on note_id in player_notes collection
-        await players_notes_collection.create_index([("note_id", 1)])
+        await players_notes_collection.create_index([("note_id", ASCENDING)])
         print("[DB] Created index on note_id in player_notes collection")
         
         # Run migration to remove name_lower field from existing records
