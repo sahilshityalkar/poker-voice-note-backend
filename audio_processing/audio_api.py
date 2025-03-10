@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 # Import the GPT analysis functions
 from audio_processing.gpt_analysis import process_transcript
 from audio_processing.player_notes_api import analyze_players_in_note
+from tasks.update_transcript import handle_update_transcript
 
 # Load environment variables
 load_dotenv()
@@ -539,55 +540,23 @@ async def update_transcript(
         # Get user's language preference, default to English if not set
         language = user.get('notes_language', 'en')
         print(f"[UPDATE] Using language: {language}")
-
-        # Process updated text with GPT
-        processed_data = await process_transcript(text, language)
         
-        # Provide default values if processing fails
-        if not processed_data:
-            processed_data = {
-                "summary": f"Error processing updated text in {language}",
-                "insight": f"The system encountered an error while analyzing this updated text"
-            }
-        
-        summary = processed_data.get("summary", "")
-        insight = processed_data.get("insight", "")
-        print(f"[UPDATE] Processing complete. Summary: {summary[:100]}...")
+        # update the transcript
 
-        # Update the note document
-        update_data = {
-            "transcript": text,  # Store updated text as transcript
-            "summary": summary,
-            "insight": insight,
-            "updatedAt": datetime.utcnow()
+        data = {
+             "transcript": text,
         }
-        
+
         await notes_collection.update_one(
             {"_id": note_obj_id},
-            {"$set": update_data}
+            {"$set": data}
         )
-        print(f"[UPDATE] Updated note with ID: {note_id}")
 
-        # Re-analyze players in the note
-        print(f"[PLAYERS] Starting player analysis for updated note {note_id}")
-        player_analysis_result = await analyze_players_in_note(note_id, user_id)
-        
-        # Check if player analysis was successful
-        if player_analysis_result.get("success", False):
-            player_notes = player_analysis_result.get("player_notes", [])
-            print(f"[PLAYERS] Successfully analyzed {len(player_notes)} players in updated note {note_id}")
-        else:
-            print(f"[PLAYERS] Player analysis failed for updated note {note_id}: {player_analysis_result.get('message', 'Unknown error')}")
-            player_notes = []
-
+        # put the task into the queue
+        handle_update_transcript.delay(text, language, note_id, user_id)
         return {
             "success": True,
-            "noteId": note_id,
-            "transcript": text,
-            "summary": summary,
-            "insight": insight,
-            "language": language,
-            "player_notes": player_notes
+            "message": "Transcript updated successfully",
         }
     except HTTPException:
         raise
