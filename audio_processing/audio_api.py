@@ -411,6 +411,121 @@ async def transcribe_audio_file(audio_url: str, user_id: str) -> Dict[str, Any]:
         print(f"[TRANSCRIBE] Error in transcribe_audio_file: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+async def process_text_directly(text: str, user_id: str) -> Dict[str, Any]:
+    """Process text directly without audio transcription - used by Celery tasks"""
+    try:
+        if not text or not text.strip():
+            return {
+                "success": False,
+                "error": "Empty text",
+                "message": "No text provided for processing",
+                "summary": "Empty text input",
+                "insight": "The text input was empty",
+                "player_notes": []
+            }
+        
+        # Get user's language preference
+        user = await user_collection.find_one({"user_id": user_id})
+        if not user:
+            return {
+                "success": False,
+                "error": "User not found",
+                "message": f"User with ID {user_id} not found",
+                "summary": "Error processing text",
+                "insight": "User not found in the system",
+                "player_notes": []
+            }
+            
+        # Get user's language preference, default to English if not set
+        language = user.get('notes_language', 'en')
+        print(f"[TEXT] Using language: {language}")
+
+        # Step 1: Process transcript with GPT in user's language (in parallel with player analysis)
+        # Create tasks to run in parallel
+        from audio_processing.gpt_analysis import process_transcript
+        
+        # Start GPT transcript analysis task
+        transcript_task = process_transcript(text, language)
+        
+        # Step 2: Create note document (without analyzed fields - we'll update it after GPT call)
+        note_id = ObjectId()
+        base_note_doc = {
+            "_id": note_id,
+            "user_id": user_id,
+            "audioFileUrl": None,  # No audio file for text input
+            "transcript": text,  # Store original text as transcript
+            "language": language,
+            "createdAt": datetime.utcnow(),
+            "updatedAt": datetime.utcnow()
+        }
+        
+        # Insert the note with basic information
+        await notes_collection.insert_one(base_note_doc)
+        print(f"[TEXT] Created note with ID: {note_id}")
+        
+        # Step 3: Start player analysis in parallel with transcript analysis
+        # Since player_analysis needs the note_id which we now have
+        from audio_processing.player_notes_api import analyze_players_in_note
+        player_analysis_task = analyze_players_in_note(str(note_id), user_id)
+        
+        # Wait for both tasks to complete in parallel
+        processed_data, player_analysis_result = await asyncio.gather(
+            transcript_task,
+            player_analysis_task
+        )
+        
+        # Process transcript results
+        # Our improved process_transcript always returns a dictionary, never None
+        # But as a safety check, provide default values if somehow it's None
+        if not processed_data:
+            processed_data = {
+                "summary": f"Error processing text in {language}",
+                "insight": f"The system encountered an error while analyzing this text"
+            }
+            
+        summary = processed_data.get("summary", "")
+        insight = processed_data.get("insight", "")
+        print(f"[TEXT] Processing complete. Summary: {summary[:100]}...")
+        
+        # Update the note with analysis results
+        await notes_collection.update_one(
+            {"_id": note_id},
+            {"$set": {
+                "summary": summary,
+                "insight": insight,
+                "updatedAt": datetime.utcnow()
+            }}
+        )
+        
+        # Process player analysis results
+        if player_analysis_result.get("success", False):
+            player_notes = player_analysis_result.get("player_notes", [])
+            print(f"[PLAYERS] Successfully analyzed {len(player_notes)} players in note {note_id}")
+        else:
+            print(f"[PLAYERS] Player analysis failed for note {note_id}: {player_analysis_result.get('message', 'Unknown error')}")
+            player_notes = []
+        
+        return {
+            "success": True,
+            "noteId": str(note_id),
+            "transcript": text,
+            "summary": summary,
+            "insight": insight,
+            "language": language,
+            "player_notes": player_notes
+        }
+        
+    except Exception as e:
+        print(f"[TEXT] Error processing text directly: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "message": "Error processing text input",
+            "summary": "Error processing text input",
+            "insight": "The system encountered an error while analyzing this text",
+            "player_notes": []
+        }
+
 @router.post("/process-text/")
 async def process_text_input(
     text: str = Body(..., media_type="text/plain"),
@@ -431,75 +546,40 @@ async def process_text_input(
         if not user:
             print(f"[USER] User not found with user_id: {user_id}")
             raise HTTPException(status_code=404, detail="User not found")
+        
+        # Queue the text processing task to Celery
+        # Import task locally to prevent circular imports
+        import sys
+        print(f"[DEBUG] Python path: {sys.path}")
+        
+        try:
+            from tasks.text_tasks import process_text_task
+            task = process_text_task.delay(text, user_id)
             
-        # Get user's language preference, default to English if not set
-        language = user.get('notes_language', 'en')
-        print(f"[TEXT] Using language: {language}")
-
-        # Process text with GPT
-        processed_data = await process_transcript(text, language)
-        
-        # Our improved process_transcript always returns a dictionary, never None
-        # But as a safety check, provide default values if somehow it's None
-        if not processed_data:
-            processed_data = {
-                "summary": f"Error processing text in {language}",
-                "insight": f"The system encountered an error while analyzing this text"
+            return {
+                "success": True,
+                "message": "Text processing started in background.",
+                "task_id": task.id,
+                "text_length": len(text)
             }
-        
-        summary = processed_data.get("summary", "")
-        insight = processed_data.get("insight", "")
-        print(f"[TEXT] Processing complete. Summary: {summary[:100]}...")
-
-        # Create note document (without players field - we'll handle players separately)
-        note_id = ObjectId()
-        note_doc = {
-            "_id": note_id,
-            "user_id": user_id,
-            "audioFileUrl": None,  # No audio file for text input
-            "transcript": text,  # Store original text as transcript
-            "summary": summary,
-            "insight": insight,
-            "language": language,
-            "createdAt": datetime.utcnow(),
-            "updatedAt": datetime.utcnow()
-        }
-
-        # Insert the note
-        await notes_collection.insert_one(note_doc)
-        print(f"[TEXT] Created note with ID: {note_id}")
-
-        # Analyze players in the note asynchronously
-        print(f"[PLAYERS] Starting player analysis for note {note_id}")
-        player_analysis_result = await analyze_players_in_note(str(note_id), user_id)
-        
-        # Check if player analysis was successful
-        if player_analysis_result.get("success", False):
-            player_notes = player_analysis_result.get("player_notes", [])
-            print(f"[PLAYERS] Successfully analyzed {len(player_notes)} players in note {note_id}")
-        else:
-            print(f"[PLAYERS] Player analysis failed for note {note_id}: {player_analysis_result.get('message', 'Unknown error')}")
-            player_notes = []
-
-        return {
-            "success": True,
-            "noteId": str(note_id),
-            "transcript": text,
-            "summary": summary,
-            "insight": insight,
-            "language": language,
-            "player_notes": player_notes
-        }
-
+        except ImportError as import_error:
+            print(f"[ERROR] Import error in process_text_input: {import_error}")
+            # Fallback to direct processing if Celery task import fails
+            print(f"[TEXT] Falling back to direct processing")
+            result = await process_text_directly(text, user_id)
+            
+            return {
+                "success": True,
+                "message": "Text processed directly (Celery unavailable)",
+                "data": result
+            }
+            
     except Exception as e:
         print(f"[TEXT] Error processing text input: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "summary": "Error processing text input",
-            "insight": "The system encountered an error while analyzing this text",
-            "player_notes": []
-        }
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
 async def get_transcript_from_deepgram_url(audio_url: str, language: str = "en") -> str:
     """Get transcript from Deepgram using an audio URL and user's preferred language"""
