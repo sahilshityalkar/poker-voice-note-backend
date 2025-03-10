@@ -173,10 +173,41 @@ async def process_audio_file(file_path: Path, content_type: str, user_id: str) -
                 "player_notes": []
             }
         
-        # Step 2: Process transcript with GPT in user's language
-        print(f"[GPT] Processing transcript in {language}...")
-        processed_data = await process_transcript(transcript, language)
+        # Step 2: Process transcript with GPT in user's language (in parallel with player analysis)
+        # Create tasks to run in parallel
+        from audio_processing.gpt_analysis import process_transcript
         
+        # Start GPT transcript analysis task
+        transcript_task = process_transcript(transcript, language)
+        
+        # Step 3: Create note document (without analyzed fields - we'll update it after GPT call)
+        note_id = ObjectId()
+        base_note_doc = {
+            "_id": note_id,
+            "user_id": user_id,
+            "audioFileUrl": str(file_path),
+            "transcript": transcript,
+            "language": language,
+            "createdAt": datetime.utcnow(),
+            "updatedAt": datetime.utcnow()
+        }
+        
+        # Insert the note with basic information
+        await notes_collection.insert_one(base_note_doc)
+        print(f"[DB] Created note with ID: {note_id}")
+        
+        # Step 4: Start player analysis in parallel with transcript analysis
+        # Since player_analysis needs the note_id which we now have
+        from audio_processing.player_notes_api import analyze_players_in_note
+        player_analysis_task = analyze_players_in_note(str(note_id), user_id)
+        
+        # Wait for both tasks to complete in parallel
+        processed_data, player_analysis_result = await asyncio.gather(
+            transcript_task,
+            player_analysis_task
+        )
+        
+        # Process transcript results
         # Our improved process_transcript always returns a dictionary, never None
         # But as a safety check, provide default values if somehow it's None
         if not processed_data:
@@ -189,29 +220,17 @@ async def process_audio_file(file_path: Path, content_type: str, user_id: str) -
         insight = processed_data.get("insight", "")
         print(f"[GPT] Processing complete. Summary: {summary[:100]}...")
         
-        # Step 3: Create note document (without players field - we'll handle players separately)
-        note_id = ObjectId()
-        note_doc = {
-            "_id": note_id,
-            "user_id": user_id,
-            "audioFileUrl": str(file_path),
-            "transcript": transcript,
-            "summary": summary,
-            "insight": insight,
-            "language": language,
-            "createdAt": datetime.utcnow(),
-            "updatedAt": datetime.utcnow()
-        }
+        # Update the note with analysis results
+        await notes_collection.update_one(
+            {"_id": note_id},
+            {"$set": {
+                "summary": summary,
+                "insight": insight,
+                "updatedAt": datetime.utcnow()
+            }}
+        )
         
-        # Insert the note
-        await notes_collection.insert_one(note_doc)
-        print(f"[DB] Created note with ID: {note_id}")
-        
-        # Step 4: Analyze players in the note asynchronously
-        print(f"[PLAYERS] Starting player analysis for note {note_id}")
-        player_analysis_result = await analyze_players_in_note(str(note_id), user_id)
-        
-        # Check if player analysis was successful
+        # Process player analysis results
         if player_analysis_result.get("success", False):
             player_notes = player_analysis_result.get("player_notes", [])
             print(f"[PLAYERS] Successfully analyzed {len(player_notes)} players in note {note_id}")
@@ -234,8 +253,9 @@ async def process_audio_file(file_path: Path, content_type: str, user_id: str) -
         return {
             "success": False,
             "error": str(e),
-            "summary": "Error processing audio",
-            "insight": "The system encountered an error while analyzing this recording",
+            "message": "Error processing audio file",
+            "summary": "Error processing recording",
+            "insight": "The system encountered an error while processing this recording",
             "player_notes": []
         }
 

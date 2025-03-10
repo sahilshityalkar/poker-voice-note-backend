@@ -337,6 +337,9 @@ async def create_or_update_player(user_id, player_name, player_data=None):
 async def analyze_players_in_note(note_id: str, user_id: str, retry_count: int = 3) -> Dict[str, Any]:
     """Analyze players in a note using GPT-4o and store the results"""
     try:
+        # Log start of player analysis
+        print(f"[PLAYERS] Starting player analysis for note {note_id}")
+        
         # Get the note
         note_obj_id = ObjectId(note_id)
         # Try to find the note with the user_id as is (UUID format)
