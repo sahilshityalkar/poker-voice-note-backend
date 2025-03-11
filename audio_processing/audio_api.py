@@ -312,7 +312,6 @@ async def upload_audio(
     file: UploadFile = File(...),
     user_id: str = Header(None)
 ):
-    from tasks.audio_tasks import process_audio_task
     if not user_id:
         raise HTTPException(status_code=400, detail="User ID is required")
     
@@ -353,6 +352,7 @@ async def upload_audio(
                 
                 # Queue the audio processing task to Celery with the GCS URI
                 try:
+                    from tasks.audio_tasks import process_audio_task
                     task = process_audio_task.delay(gcs_uri, file.content_type, user_id)
                     
                     return {
@@ -362,39 +362,55 @@ async def upload_audio(
                         "file_id": unique_filename,
                         "gcs_uri": gcs_uri
                     }
-                except ImportError as import_error:
-                    print(f"[ERROR] Import error in upload_audio: {import_error}")
-                    # Fallback to direct processing if Celery task import fails
-                    print(f"[UPLOAD] Falling back to direct processing for {gcs_uri}")
-                    result = process_audio_task.delay(gcs_uri, file.content_type, user_id)
+                except Exception as task_error:
+                    print(f"[ERROR] Failed to queue audio processing task: {task_error}")
                     
                     return {
                         "success": True,
-                        "message": "Audio processed directly (Celery unavailable)",
-                        "data": result,
-                        "gcs_uri": gcs_uri
+                        "message": "Audio file uploaded successfully, but processing task could not be queued. Please try processing again later.",
+                        "file_id": unique_filename,
+                        "gcs_uri": gcs_uri,
+                        "error": str(task_error)
                     }
             except Exception as storage_error:
                 print(f"[ERROR] Cloud Storage error: {storage_error}")
-                # Fallback to local processing if GCP upload fails
-                print(f"[UPLOAD] Falling back to local file processing for {temp_file_path}")
-                result = process_audio_task.delay(temp_file_path, file.content_type, user_id)
-                
-                return {
-                    "success": True,
-                    "message": "Audio processed locally (Cloud Storage unavailable)",
-                    "data": result
-                }
+                return {"success": False, "error": str(storage_error)}
         else:
             # No storage client, fallback to local processing
-            print(f"[UPLOAD] No GCP client available, using local file: {temp_file_path}")
-            result = process_audio_task.delay(temp_file_path, file.content_type, user_id)
-            
-            return {
-                "success": True,
-                "message": "Audio processed locally (Cloud Storage not configured)",
-                "data": result
-            }
+            print("[UPLOAD] No storage client available. Processing file locally.")
+            try:
+                # Save the file locally to a temporary location
+                unique_filename = f"{uuid.uuid4()}.{file.filename.split('.')[-1]}"
+                temp_dir = Path("./temp_audio")
+                temp_dir.mkdir(exist_ok=True)
+                temp_file_path = temp_dir / unique_filename
+                
+                # Save the uploaded file to the temporary location
+                with open(temp_file_path, "wb") as f:
+                    f.write(await file.read())
+                
+                # Queue the processing task with the local file path
+                try:
+                    from tasks.audio_tasks import process_audio_task
+                    task = process_audio_task.delay(str(temp_file_path), file.content_type, user_id)
+                    
+                    return {
+                        "success": True,
+                        "message": "Audio file saved locally. Processing started in background.",
+                        "task_id": task.id,
+                        "file_id": unique_filename
+                    }
+                except Exception as task_error:
+                    print(f"[ERROR] Failed to queue audio processing task: {task_error}")
+                    return {
+                        "success": True,
+                        "message": "Audio file saved locally, but processing task could not be queued. Please try processing again later.",
+                        "file_id": unique_filename,
+                        "error": str(task_error)
+                    }
+            except Exception as local_error:
+                print(f"[ERROR] Local file processing error: {local_error}")
+                return {"success": False, "error": str(local_error)}
             
     except Exception as e:
         print(f"[ERROR] Error uploading audio: {e}")
