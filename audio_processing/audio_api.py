@@ -366,7 +366,7 @@ async def upload_audio(
                     print(f"[ERROR] Import error in upload_audio: {import_error}")
                     # Fallback to direct processing if Celery task import fails
                     print(f"[UPLOAD] Falling back to direct processing for {gcs_uri}")
-                    result = await process_audio_file(gcs_uri, file.content_type, user_id)
+                    result = process_audio_task.delay(gcs_uri, file.content_type, user_id)
                     
                     return {
                         "success": True,
@@ -378,7 +378,7 @@ async def upload_audio(
                 print(f"[ERROR] Cloud Storage error: {storage_error}")
                 # Fallback to local processing if GCP upload fails
                 print(f"[UPLOAD] Falling back to local file processing for {temp_file_path}")
-                result = await process_audio_file(Path(temp_file_path), file.content_type, user_id)
+                result = process_audio_task.delay(Path(temp_file_path), file.content_type, user_id)
                 
                 return {
                     "success": True,
@@ -388,7 +388,7 @@ async def upload_audio(
         else:
             # No storage client, fallback to local processing
             print(f"[UPLOAD] No GCP client available, using local file: {temp_file_path}")
-            result = await process_audio_file(Path(temp_file_path), file.content_type, user_id)
+            result = process_audio_task.delay(Path(temp_file_path), file.content_type, user_id)
             
             return {
                 "success": True,
