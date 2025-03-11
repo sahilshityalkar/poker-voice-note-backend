@@ -14,6 +14,8 @@ import json
 from pydantic import BaseModel, Field
 import re
 import traceback
+from google.cloud import storage
+from google.oauth2 import service_account
 
 # Import the GPT analysis functions
 from audio_processing.gpt_analysis import process_transcript
@@ -42,6 +44,24 @@ notes_collection = db.notes
 players_collection = db.players
 players_notes_collection = db.players_notes
 user_collection = db.users  # Add user collection
+
+# GCP Cloud Storage configuration
+GCP_BUCKET_NAME = os.environ.get("GCP_BUCKET_NAME", "your-bucket-name")
+GCP_CREDENTIALS_PATH = os.environ.get("GCP_CREDENTIALS_PATH", "path/to/your/credentials.json")
+
+# Initialize GCP storage client
+def get_storage_client():
+    """Initialize and return a GCP storage client."""
+    try:
+        if os.path.exists(GCP_CREDENTIALS_PATH):
+            credentials = service_account.Credentials.from_service_account_file(GCP_CREDENTIALS_PATH)
+            return storage.Client(credentials=credentials)
+        else:
+            # Use default credentials if available
+            return storage.Client()
+    except Exception as e:
+        print(f"[ERROR] Failed to initialize GCP storage client: {e}")
+        return None
 
 ALLOWED_AUDIO_TYPES = {
     "audio/mpeg": ".mp3",
@@ -149,8 +169,37 @@ async def get_transcript_from_deepgram(file_path: Path, content_type: str, langu
         raise
 
 async def process_audio_file(file_path: Path, content_type: str, user_id: str) -> Dict[str, Any]:
-    """Process audio file to get transcript, summary, and insight in user's language"""
+    """Process an audio file, either from a local path or a GCS URI."""
     try:
+        # Check if the file_path is a GCS URI
+        if isinstance(file_path, str) and file_path.startswith("gs://"):
+            # Extract the bucket name and blob name from the GCS URI
+            # Format: gs://bucket-name/path/to/file
+            parts = file_path[5:].split("/", 1)
+            bucket_name = parts[0]
+            blob_name = parts[1]
+            
+            # Get a temporary signed URL for processing
+            storage_client = get_storage_client()
+            if not storage_client:
+                raise Exception("Storage client not available")
+                
+            bucket = storage_client.bucket(bucket_name)
+            blob = bucket.blob(blob_name)
+            signed_url = blob.generate_signed_url(
+                version="v4",
+                expiration=3600,  # 1 hour
+                method="GET"
+            )
+            
+            # Use the signed URL for transcription
+            transcript = await get_transcript_from_deepgram_url(signed_url, "en")
+        else:
+            # Handle local file (existing behavior)
+            if isinstance(file_path, str):
+                file_path = Path(file_path)
+            transcript = await get_transcript_from_deepgram(file_path, content_type)
+        
         # Get user's language preference
         user = await user_collection.find_one({"user_id": user_id})
         if not user:
@@ -159,9 +208,6 @@ async def process_audio_file(file_path: Path, content_type: str, user_id: str) -
             
         language = user.get("notes_language", "en")  # Default to English if not set
         print(f"[AUDIO] Processing audio for user {user_id} in language: {language}")
-        
-        # Step 1: Get transcript from Deepgram with user's language preference
-        transcript = await get_transcript_from_deepgram(file_path, content_type, language)
         
         # Check if transcript is empty and terminate early if it is
         if not transcript or transcript.strip() == "":
@@ -266,55 +312,87 @@ async def upload_audio(
     file: UploadFile = File(...),
     user_id: str = Header(None)
 ):
-    """Upload audio file and process it asynchronously using Celery"""
+    if not user_id:
+        raise HTTPException(status_code=400, detail="User ID is required")
+    
     try:
-        if not user_id:
-            raise HTTPException(status_code=400, detail="User ID is required")
-            
-        # Get user's language preference
-        user = await user_collection.find_one({"user_id": user_id})
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-            
-        language = user.get("notes_language", "en")  # Default to English if not set
-        print(f"[UPLOAD] Processing upload for user {user_id} in language: {language}")
-        
-        # Create upload directory if it doesn't exist
-        os.makedirs(UPLOAD_DIR, exist_ok=True)
-        
         # Generate a unique filename
         file_extension = os.path.splitext(file.filename)[1]
         unique_filename = f"{uuid.uuid4()}{file_extension}"
-        file_path = os.path.join(UPLOAD_DIR, unique_filename)
         
-        # Save the file
-        with open(file_path, "wb") as buffer:
+        # Create a temporary local file
+        temp_file_path = os.path.join(UPLOAD_DIR, unique_filename)
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        
+        # Save the file temporarily
+        with open(temp_file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
-        # Queue the audio processing task to Celery
-        # Import task locally to prevent circular imports
-        import sys
-        print(f"[DEBUG] Python path: {sys.path}")
-        
-        try:
-            from tasks.audio_tasks import process_audio_task
-            task = process_audio_task.delay(file_path, file.content_type, user_id)
+        # Upload to GCP Cloud Storage
+        storage_client = get_storage_client()
+        if storage_client:
+            try:
+                bucket = storage_client.bucket(GCP_BUCKET_NAME)
+                blob = bucket.blob(f"audio/{unique_filename}")
+                
+                blob.upload_from_filename(temp_file_path)
+                
+                # Generate a signed URL that will be valid for 1 hour
+                signed_url = blob.generate_signed_url(
+                    version="v4",
+                    expiration=3600,  # 1 hour
+                    method="GET"
+                )
+                
+                # Remove the temporary file after upload
+                os.remove(temp_file_path)
+                
+                # Use the GCS URI format for the file path
+                gcs_uri = f"gs://{GCP_BUCKET_NAME}/audio/{unique_filename}"
+                
+                # Queue the audio processing task to Celery with the GCS URI
+                try:
+                    from tasks.audio_tasks import process_audio_task
+                    task = process_audio_task.delay(gcs_uri, file.content_type, user_id)
+                    
+                    return {
+                        "success": True,
+                        "message": "Audio file uploaded to Cloud Storage. Processing started in background.",
+                        "task_id": task.id,
+                        "file_id": unique_filename,
+                        "gcs_uri": gcs_uri
+                    }
+                except ImportError as import_error:
+                    print(f"[ERROR] Import error in upload_audio: {import_error}")
+                    # Fallback to direct processing if Celery task import fails
+                    print(f"[UPLOAD] Falling back to direct processing for {gcs_uri}")
+                    result = await process_audio_file(gcs_uri, file.content_type, user_id)
+                    
+                    return {
+                        "success": True,
+                        "message": "Audio processed directly (Celery unavailable)",
+                        "data": result,
+                        "gcs_uri": gcs_uri
+                    }
+            except Exception as storage_error:
+                print(f"[ERROR] Cloud Storage error: {storage_error}")
+                # Fallback to local processing if GCP upload fails
+                print(f"[UPLOAD] Falling back to local file processing for {temp_file_path}")
+                result = await process_audio_file(Path(temp_file_path), file.content_type, user_id)
+                
+                return {
+                    "success": True,
+                    "message": "Audio processed locally (Cloud Storage unavailable)",
+                    "data": result
+                }
+        else:
+            # No storage client, fallback to local processing
+            print(f"[UPLOAD] No GCP client available, using local file: {temp_file_path}")
+            result = await process_audio_file(Path(temp_file_path), file.content_type, user_id)
             
             return {
                 "success": True,
-                "message": "Audio file uploaded successfully. Processing started in background.",
-                "task_id": task.id,
-                "file_id": unique_filename
-            }
-        except ImportError as import_error:
-            print(f"[ERROR] Import error in upload_audio: {import_error}")
-            # Fallback to direct processing if Celery task import fails
-            print(f"[UPLOAD] Falling back to direct processing for {file_path}")
-            result = await process_audio_file(Path(file_path), file.content_type, user_id)
-            
-            return {
-                "success": True,
-                "message": "Audio processed directly (Celery unavailable)",
+                "message": "Audio processed locally (Cloud Storage not configured)",
                 "data": result
             }
             

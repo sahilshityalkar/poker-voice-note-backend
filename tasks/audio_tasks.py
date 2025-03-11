@@ -28,7 +28,7 @@ def process_audio_task(self, file_path: str, content_type: str, user_id: str) ->
     Celery task to process an audio file in the background.
     
     Args:
-        file_path: Path to the saved audio file
+        file_path: Path to the saved audio file or GCS URI
         content_type: MIME type of the audio file
         user_id: User ID of the uploader
         
@@ -49,14 +49,27 @@ def process_audio_task(self, file_path: str, content_type: str, user_id: str) ->
             }
         )
         
-        # Convert string path to Path object
-        path_obj = Path(file_path)
-        
-        # Create an event loop and run the async function
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(process_audio_file(path_obj, content_type, user_id))
-        loop.close()
+        # Check if the file path is a GCS URI
+        if file_path.startswith("gs://"):
+            # Pass the GCS URI directly to process_audio_file
+            # It will handle extracting the bucket and blob info
+            print(f"[CELERY] Processing GCS URI: {file_path}")
+            
+            # Create an event loop and run the async function
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(process_audio_file(file_path, content_type, user_id))
+            loop.close()
+        else:
+            # Handle local file path (existing behavior)
+            # Convert string path to Path object
+            path_obj = Path(file_path)
+            
+            # Create an event loop and run the async function
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(process_audio_file(path_obj, content_type, user_id))
+            loop.close()
         
         # Here you could add notification logic to inform the user
         # (e.g., send an email, push notification, or websocket message)

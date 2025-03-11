@@ -12,3 +12,5 @@ motor
 email-validator
 celery
 nest_asyncio
+google-cloud-storage
+google-auth
