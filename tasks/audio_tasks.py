@@ -49,30 +49,44 @@ def process_audio_task(self, file_path: str, content_type: str, user_id: str) ->
             }
         )
         
-        # Check if the file path is a GCS URI
-        if file_path.startswith("gs://"):
-            # Pass the GCS URI directly to process_audio_file
-            # It will handle extracting the bucket and blob info
-            print(f"[CELERY] Processing GCS URI: {file_path}")
-            
-            # Create an event loop and run the async function
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(process_audio_file(file_path, content_type, user_id))
-            loop.close()
-        else:
-            # Handle local file path (existing behavior)
-            # Convert string path to Path object
-            path_obj = Path(file_path)
-            
-            # Create an event loop and run the async function
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(process_audio_file(path_obj, content_type, user_id))
-            loop.close()
+        # Safely create and use an event loop without closing it
+        try:
+            # First check if there's a running event loop we can use
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_closed():
+                    print("[CELERY] Existing event loop is closed, creating a new one")
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+            except RuntimeError:
+                # No event loop in this thread, create one
+                print("[CELERY] No event loop in thread, creating a new one")
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+            # Check if the file path is a GCS URI
+            if file_path.startswith("gs://"):
+                # Pass the GCS URI directly to process_audio_file
+                print(f"[CELERY] Processing GCS URI: {file_path}")
+                result = loop.run_until_complete(process_audio_file(file_path, content_type, user_id))
+            else:
+                # Handle local file path
+                path_obj = Path(file_path)
+                result = loop.run_until_complete(process_audio_file(path_obj, content_type, user_id))
+                
+        except Exception as loop_error:
+            print(f"[AUDIO] Error processing audio file: {loop_error}")
+            # Return a meaningful error without crashing
+            result = {
+                "success": False,
+                "error": str(loop_error),
+                "message": "Error processing audio file",
+                "summary": "Error processing audio file",
+                "insight": "The system encountered an error while processing this audio",
+                "player_notes": []
+            }
         
         # Here you could add notification logic to inform the user
-        # (e.g., send an email, push notification, or websocket message)
         print(f"[CELERY] Completed audio processing task {task_id} for user {user_id}")
         
         # Return the full result

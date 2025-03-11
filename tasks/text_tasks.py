@@ -46,16 +46,38 @@ def process_text_task(self, text: str, user_id: str) -> Dict[str, Any]:
             }
         )
         
-        # Create an event loop and run the async function
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
         # Import here to avoid circular imports
         from audio_processing.audio_api import process_text_directly
         
-        # Process the text
-        result = loop.run_until_complete(process_text_directly(text, user_id))
-        loop.close()
+        # Safely create and use an event loop without closing it
+        try:
+            # First check if there's a running event loop we can use
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_closed():
+                    print("[CELERY] Existing event loop is closed, creating a new one")
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+            except RuntimeError:
+                # No event loop in this thread, create one
+                print("[CELERY] No event loop in thread, creating a new one")
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+            # Process the text
+            result = loop.run_until_complete(process_text_directly(text, user_id))
+            
+        except Exception as loop_error:
+            print(f"[TEXT] Error processing text directly: {loop_error}")
+            # Return a meaningful error without crashing
+            result = {
+                "success": False,
+                "error": str(loop_error),
+                "message": "Error processing text input",
+                "summary": "Error processing text input",
+                "insight": "The system encountered an error while analyzing this text",
+                "player_notes": []
+            }
         
         print(f"[CELERY] Completed text processing task {task_id} for user {user_id}")
         
