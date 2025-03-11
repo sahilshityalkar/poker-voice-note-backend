@@ -27,7 +27,6 @@ app.conf.update(
     timezone='UTC',
     enable_utc=True,
     broker_connection_retry_on_startup=True,
-    worker_concurrency=4,
     task_track_started=True,  # Track when tasks are started
     task_time_limit=3600,     # 1 hour time limit per task
 )
