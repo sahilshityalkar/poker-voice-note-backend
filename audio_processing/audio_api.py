@@ -312,6 +312,7 @@ async def upload_audio(
     file: UploadFile = File(...),
     user_id: str = Header(None)
 ):
+    from tasks.audio_tasks import process_audio_task
     if not user_id:
         raise HTTPException(status_code=400, detail="User ID is required")
     
@@ -352,7 +353,6 @@ async def upload_audio(
                 
                 # Queue the audio processing task to Celery with the GCS URI
                 try:
-                    from tasks.audio_tasks import process_audio_task
                     task = process_audio_task.delay(gcs_uri, file.content_type, user_id)
                     
                     return {
