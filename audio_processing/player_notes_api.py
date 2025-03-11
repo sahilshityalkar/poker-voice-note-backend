@@ -245,6 +245,60 @@ Objective:
 Deliver a comprehensive, HTML-enhanced analysis that allows the user to quickly grasp each player's tendencies and adjust their strategy accordingly.
 """
 
+# Follow-up player analysis prompt template to find any missed players
+PLAYER_ANALYSIS_FOLLOWUP_PROMPT = """
+You are a top-level professional quality poker analysis and educator. Your task is to review a poker transcript and VERIFY that ALL players have been identified correctly in the initial analysis.
+
+FIRST ANALYSIS RESULTS:
+{first_analysis}
+
+Original Transcript:
+{transcript}
+
+CRITICAL TASK: Review the transcript carefully and identify ANY players that might have been missed in the first analysis.
+
+Focus on these potential reasons for missed players:
+1. Names mentioned only once or briefly
+2. Unusual or misspelled player names
+3. Indirect references to players
+4. Players mentioned in complex contexts
+5. Names that might be confused with other terms
+6. Referenced players who didn't take obvious actions
+
+PLAYER IDENTIFICATION GUIDELINES:
+1. A player is ANYONE who is:
+   - Taking poker actions (bet, raise, fold, check, call)
+   - Described as having cards or a hand
+   - Referred to as being in a position (SB, BB, button, etc.)
+   - Mentioned as winning or losing a pot
+   - Described in terms of their play style or strategy
+
+2. IMPORTANT - MATCHING EXISTING PLAYERS:
+   - If a player name in the transcript seems to match or is similar to one in the available players list, ALWAYS use the EXACT name from the list
+   - Even if there are slight spelling variations or differences in case, use the exact name from the available players list
+   - This ensures consistent player tracking across multiple recordings
+   - The list of available players is: {available_players}
+
+JSON FORMAT:
+If you find ANY missed players, return a valid JSON with ONLY the new players:
+{{
+  "missed_players": [
+    {{
+      "playername": "ExactPlayerName",
+      "description_text": "Player analysis in clear text format...",
+      "description_html": "<p><strong>Preflop:</strong> Player analysis...</p><p><strong>Postflop:</strong> More analysis...</p>..."
+    }}
+  ]
+}}
+
+If NO additional players are found, return:
+{{
+  "missed_players": []
+}}
+
+IMPORTANT: Return ONLY valid JSON! No explanation text before or after.
+"""
+
 async def get_available_players(user_id: str) -> List[Dict[str, str]]:
     """Get all available players for a user"""
     try:
@@ -362,11 +416,19 @@ def parse_gpt_player_response(raw_response: str) -> Dict:
         # Parse the JSON
         analysis_result = json.loads(cleaned_result)
         
-        # Validate the result
-        if "players" not in analysis_result or not isinstance(analysis_result["players"], list):
-            print(f"[ANALYSIS] Invalid response format (missing players array): {cleaned_result[:200]}")
-            # Create an empty players array
-            analysis_result = {"players": []}
+        # Validate the result - handle both "players" and "missed_players" format
+        if "players" not in analysis_result and "missed_players" not in analysis_result:
+            print(f"[ANALYSIS] Invalid response format (missing players or missed_players array): {cleaned_result[:200]}")
+            # Create a default structure with empty arrays
+            analysis_result = {"players": [], "missed_players": []}
+        
+        # Ensure "players" exists even if only "missed_players" is in the response
+        if "players" not in analysis_result:
+            analysis_result["players"] = []
+            
+        # Ensure "missed_players" exists even if only "players" is in the response
+        if "missed_players" not in analysis_result:
+            analysis_result["missed_players"] = []
             
         return analysis_result
     
@@ -374,12 +436,12 @@ def parse_gpt_player_response(raw_response: str) -> Dict:
         print(f"[ANALYSIS] JSON decode error: {e}")
         print(f"[ANALYSIS] Attempted to parse: {raw_response[:200]}...")
         # Return empty result on failure
-        return {"players": []}
+        return {"players": [], "missed_players": []}
     
     except Exception as e:
         print(f"[ANALYSIS] Error parsing GPT response: {e}")
         # Return empty result on failure
-        return {"players": []}
+        return {"players": [], "missed_players": []}
 
 async def analyze_players_in_note(note_id: str, user_id: str, retry_count: int = 3, is_update: bool = False) -> Dict[str, Any]:
     """
@@ -503,7 +565,49 @@ Format your response as valid JSON with a 'players' array."""
                     player_count = len(result_json.get("players", []))
                     print(f"[ANALYSIS] Successfully parsed JSON with {player_count} players")
                     
-                    # Process the players
+                    # Perform a follow-up analysis to find any missed players
+                    print(f"[ANALYSIS] Performing follow-up analysis to find any missed players")
+                    
+                    try:
+                        # Create a summary of the first analysis to include in the follow-up prompt
+                        first_analysis_summary = json.dumps({"players": [{"playername": p["playername"]} for p in result_json.get("players", [])]})
+                        
+                        # Create the follow-up prompt
+                        followup_prompt = PLAYER_ANALYSIS_FOLLOWUP_PROMPT.format(
+                            first_analysis=first_analysis_summary,
+                            transcript=transcript,
+                            available_players=", ".join(player_names) if player_names else ""
+                        )
+                        
+                        # Get follow-up GPT response with a timeout to prevent blocking
+                        followup_raw_response = await asyncio.wait_for(
+                            get_gpt_response(
+                                prompt=followup_prompt,
+                                system_message=f"You are a poker analysis expert. Your task is to find ANY missed players from the transcript that weren't caught in the first analysis. Return valid JSON. ALL content must be in {language}."
+                            ),
+                            timeout=60  # 60 second timeout for the follow-up request
+                        )
+                        
+                        # Parse the follow-up response
+                        followup_json = parse_gpt_player_response(followup_raw_response)
+                        missed_players = followup_json.get("missed_players", [])
+                        
+                        if missed_players:
+                            print(f"[ANALYSIS] Found {len(missed_players)} additional players in follow-up analysis")
+                            
+                            # Add the missed players to the original result
+                            result_json["players"].extend(missed_players)
+                            print(f"[ANALYSIS] Combined result now has {len(result_json['players'])} players")
+                        else:
+                            print(f"[ANALYSIS] No additional players found in follow-up analysis")
+                    except asyncio.TimeoutError:
+                        print(f"[ANALYSIS] Follow-up analysis timed out, continuing with original players")
+                    except Exception as e:
+                        print(f"[ANALYSIS] Error during follow-up analysis: {e}")
+                        print(f"[ANALYSIS] Traceback: {traceback.format_exc()}")
+                        print(f"[ANALYSIS] Continuing with original players")
+                    
+                    # Process the combined players result
                     player_notes = await process_players_analysis(result_json, note_id, user_id, transcript, is_update=is_update)
                     
                     # Return the result
