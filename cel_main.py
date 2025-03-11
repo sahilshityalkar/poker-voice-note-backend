@@ -13,7 +13,7 @@ load_dotenv()
 
 # Setup Celery app
 app = Celery('cel_main', 
-             broker='pyamqp://dolmoyuh:rp1AyfkAQbbDrrgFVQ2Sqkfr_wRJBNZW@puffin.rmq2.cloudamqp.com/dolmoyuh',
+             broker=os.getenv('RABBITMQ_URL'),  # Use the RabbitMQ URL from the .env file
              backend='rpc://')  # Using RPC for result backend
 
 # Include tasks packages
