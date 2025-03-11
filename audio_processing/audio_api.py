@@ -378,7 +378,7 @@ async def upload_audio(
                 print(f"[ERROR] Cloud Storage error: {storage_error}")
                 # Fallback to local processing if GCP upload fails
                 print(f"[UPLOAD] Falling back to local file processing for {temp_file_path}")
-                result = process_audio_task.delay(Path(temp_file_path), file.content_type, user_id)
+                result = process_audio_task.delay(temp_file_path, file.content_type, user_id)
                 
                 return {
                     "success": True,
@@ -388,7 +388,7 @@ async def upload_audio(
         else:
             # No storage client, fallback to local processing
             print(f"[UPLOAD] No GCP client available, using local file: {temp_file_path}")
-            result = process_audio_task.delay(Path(temp_file_path), file.content_type, user_id)
+            result = process_audio_task.delay(temp_file_path, file.content_type, user_id)
             
             return {
                 "success": True,
