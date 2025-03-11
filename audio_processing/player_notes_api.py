@@ -13,6 +13,15 @@ import traceback
 import re
 import logging
 from pymongo import TEXT, ASCENDING
+import sys
+
+# Add parent directory to path to allow imports
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
+# Import the get_database_connection function
+from database import get_database_connection
 
 # Define the logger
 logger = logging.getLogger(__name__)
@@ -22,15 +31,46 @@ load_dotenv()
 
 router = APIRouter()
 
-# MongoDB setup
+# MongoDB setup - Use the new connection function
 MONGODB_URL = os.getenv("DATABASE_URL")
-client = AsyncIOMotorClient(MONGODB_URL)
+# Create a fresh connection with the current event loop
+client = get_database_connection()
 db = client.pokernotes
 
 # Collections
 players_collection = db.players
 notes_collection = db.notes
 players_notes_collection = db.players_notes
+
+# Export collections for direct import
+__all__ = ['players_collection', 'notes_collection', 'players_notes_collection', 'db']
+
+# Function to get a fresh database connection with the current event loop
+def get_fresh_connection():
+    """Get a fresh database connection with the current event loop"""
+    try:
+        # Get a fresh connection
+        fresh_client = get_database_connection()
+        fresh_db = fresh_client.pokernotes
+        
+        # Return updated collections
+        return {
+            'client': fresh_client,
+            'db': fresh_db,
+            'players': fresh_db.players,
+            'notes': fresh_db.notes,
+            'players_notes': fresh_db.players_notes
+        }
+    except Exception as e:
+        print(f"[DB] Error getting fresh connection: {e}")
+        # Fall back to existing connection
+        return {
+            'client': client,
+            'db': db,
+            'players': players_collection,
+            'notes': notes_collection,
+            'players_notes': players_notes_collection
+        }
 
 # Set up indexes for better performance
 async def ensure_indexes():
@@ -119,8 +159,10 @@ async def migrate_fix_player_notes_structure():
         print(f"[MIGRATION] Error fixing player notes structure: {e}")
         print(f"[MIGRATION] Traceback: {traceback.format_exc()}")
 
-# Create indexes on startup
-asyncio.create_task(ensure_indexes())
+# Instead of calling asyncio.create_task directly, create a setup function
+# that can be called from FastAPI startup event
+async def setup_indexes():
+    await ensure_indexes()
 
 # Player analysis prompt template
 PLAYER_ANALYSIS_PROMPT = """
@@ -203,6 +245,60 @@ Objective:
 Deliver a comprehensive, HTML-enhanced analysis that allows the user to quickly grasp each player's tendencies and adjust their strategy accordingly.
 """
 
+# Follow-up player analysis prompt template to find any missed players
+PLAYER_ANALYSIS_FOLLOWUP_PROMPT = """
+You are a top-level professional quality poker analysis and educator. Your task is to review a poker transcript and VERIFY that ALL players have been identified correctly in the initial analysis.
+
+FIRST ANALYSIS RESULTS:
+{first_analysis}
+
+Original Transcript:
+{transcript}
+
+CRITICAL TASK: Review the transcript carefully and identify ANY players that might have been missed in the first analysis.
+
+Focus on these potential reasons for missed players:
+1. Names mentioned only once or briefly
+2. Unusual or misspelled player names
+3. Indirect references to players
+4. Players mentioned in complex contexts
+5. Names that might be confused with other terms
+6. Referenced players who didn't take obvious actions
+
+PLAYER IDENTIFICATION GUIDELINES:
+1. A player is ANYONE who is:
+   - Taking poker actions (bet, raise, fold, check, call)
+   - Described as having cards or a hand
+   - Referred to as being in a position (SB, BB, button, etc.)
+   - Mentioned as winning or losing a pot
+   - Described in terms of their play style or strategy
+
+2. IMPORTANT - MATCHING EXISTING PLAYERS:
+   - If a player name in the transcript seems to match or is similar to one in the available players list, ALWAYS use the EXACT name from the list
+   - Even if there are slight spelling variations or differences in case, use the exact name from the available players list
+   - This ensures consistent player tracking across multiple recordings
+   - The list of available players is: {available_players}
+
+JSON FORMAT:
+If you find ANY missed players, return a valid JSON with ONLY the new players:
+{{
+  "missed_players": [
+    {{
+      "playername": "ExactPlayerName",
+      "description_text": "Player analysis in clear text format...",
+      "description_html": "<p><strong>Preflop:</strong> Player analysis...</p><p><strong>Postflop:</strong> More analysis...</p>..."
+    }}
+  ]
+}}
+
+If NO additional players are found, return:
+{{
+  "missed_players": []
+}}
+
+IMPORTANT: Return ONLY valid JSON! No explanation text before or after.
+"""
+
 async def get_available_players(user_id: str) -> List[Dict[str, str]]:
     """Get all available players for a user"""
     try:
@@ -212,133 +308,190 @@ async def get_available_players(user_id: str) -> List[Dict[str, str]]:
         print(f"Error getting available players: {e}")
         return []
 
-async def create_or_update_player(user_id, player_name, player_data=None):
-    """Create a new player or update an existing one."""
+async def create_or_update_player(user_id, player_name, player_data=None, custom_collection=None):
+    """
+    Create a new player if it doesn't exist or update an existing one
+    
+    Args:
+        user_id: User ID
+        player_name: Player name to create or update
+        player_data: Optional additional player data
+        custom_collection: Optional custom players collection to use (for fresh connections)
+    
+    Returns:
+        Tuple of (player_id, is_new) where is_new is True if player was created, False if updated
+    """
     try:
+        # Use the provided collection or fall back to global
+        p_collection = custom_collection if custom_collection is not None else players_collection
+        
+        # Clean player name
+        player_name = player_name.strip()
         if not player_name:
-            print("[PLAYER] Skipping player with empty name")
-            return None, None
+            print(f"[PLAYER] Invalid player name: {player_name}")
+            return None, False
             
-        # First try to find an exact match
-        existing_player = await players_collection.find_one({
+        # Try to find the player by name
+        existing_player = await p_collection.find_one({
             "user_id": user_id,
-            "name": player_name
+            "name": {"$regex": f"^{re.escape(player_name)}$", "$options": "i"}
         })
         
-        # If no exact match, try case-insensitive match
-        if not existing_player:
-            all_user_players = await players_collection.find({"user_id": user_id}).to_list(length=None)
-            
-            # Manual case-insensitive matching in Python
-            player_name_lower = player_name.lower()
-            for player in all_user_players:
-                if player.get("name", "").lower() == player_name_lower:
-                    existing_player = player
-                    break
+        is_new = False
+        current_time = datetime.utcnow()
         
         if existing_player:
-            print(f"[PLAYER] Updating existing player: {player_name}")
+            # Update existing player
+            player_id = existing_player["_id"]
+            print(f"[PLAYER] Updating existing player: {player_name} ({player_id})")
             
-            # Update fields if player_data is provided
-            if player_data:
-                update_data = {
-                    "$set": {
-                        "updated_at": datetime.now()
-                    }
-                }
-                
-                # Add other fields from player_data - EXCLUDE analysis-specific fields
-                # that should only be in player_notes collection
-                excluded_fields = ["_id", "user_id", "name", "notes", "note_id", "player_note_id", 
-                                 "description_text", "description_html", "playername"]
-                
-                for key, value in player_data.items():
-                    if key not in excluded_fields:
-                        update_data["$set"][key] = value
-                
-                # Add the note ID to the notes array if it's not already present
-                if "note_id" in player_data and "player_note_id" in player_data:
-                    update_data["$addToSet"] = {
-                        "notes": {
-                            "note_id": str(player_data["note_id"]), 
-                            "player_note_id": str(player_data["player_note_id"])
-                        }
-                    }
-                
-                result = await players_collection.update_one(
-                    {"_id": existing_player["_id"]},
-                    update_data
-                )
-                
-                return existing_player["_id"], True
-            
-            return existing_player["_id"], False
-        else:
-            print(f"[PLAYER] Creating new player: {player_name}")
-            # Create new player document
-            new_player = {
-                "user_id": user_id,
-                "name": player_name,
-                "notes": [],
-                "created_at": datetime.now(),
-                "updated_at": datetime.now()
+            # Default update data
+            update_data = {
+                "updated_at": current_time
             }
             
-            # Add player_data fields if provided
+            # Add any additional player data
             if player_data:
-                if "note_id" in player_data and "player_note_id" in player_data:
-                    new_player["notes"].append({
-                        "note_id": str(player_data["note_id"]),
-                        "player_note_id": str(player_data["player_note_id"])
-                    })
-                
-                # Add other fields from player_data - EXCLUDE analysis-specific fields
-                # that should only be in player_notes collection
-                excluded_fields = ["_id", "user_id", "name", "notes", "note_id", "player_note_id", 
-                                 "description_text", "description_html", "playername"]
-                
                 for key, value in player_data.items():
-                    if key not in excluded_fields:
-                        new_player[key] = value
+                    if key not in ["_id", "user_id", "name", "created_at"]:
+                        update_data[key] = value
             
-            # Verify one last time that we don't already have this player with different case
-            player_name_lower = player_name.lower()
-            existing_players = await players_collection.find({"user_id": user_id}).to_list(length=None)
-            for existing in existing_players:
-                if existing.get("name", "").lower() == player_name_lower:
-                    # We found a match, so use that player instead of creating a new one
-                    print(f"[PLAYER] Found existing player with different case: {existing['name']}")
-                    
-                    # Update notes if needed
-                    if player_data and "note_id" in player_data and "player_note_id" in player_data:
-                        await players_collection.update_one(
-                            {"_id": existing["_id"]},
-                            {"$addToSet": {
-                                "notes": {
-                                    "note_id": str(player_data["note_id"]),
-                                    "player_note_id": str(player_data["player_note_id"])
-                                }
-                            }}
-                        )
-                    
-                    return existing["_id"], True
+            # Update the player
+            await p_collection.update_one(
+                {"_id": player_id},
+                {"$set": update_data}
+            )
+        else:
+            # Create new player
+            is_new = True
+            print(f"[PLAYER] Creating new player: {player_name}")
             
-            # If we reach here, it's safe to insert the new player
-            result = await players_collection.insert_one(new_player)
-            return result.inserted_id, True
-    
+            # Default player document
+            player_doc = {
+                "user_id": user_id,
+                "name": player_name,
+                "created_at": current_time,
+                "updated_at": current_time,
+                "notes": []
+            }
+            
+            # Add any additional player data
+            if player_data:
+                for key, value in player_data.items():
+                    if key not in ["_id", "user_id", "name", "created_at"]:
+                        player_doc[key] = value
+            
+            # Insert the player
+            result = await p_collection.insert_one(player_doc)
+            player_id = result.inserted_id
+            
+        return player_id, is_new
     except Exception as e:
-        print(f"[PLAYER] Error in create_or_update_player: {str(e)}")
+        print(f"[PLAYER] Error in create_or_update_player: {e}")
+        traceback.print_exc()
         print(f"[PLAYER] Traceback: {traceback.format_exc()}")
         return None, False
 
-async def analyze_players_in_note(note_id: str, user_id: str, retry_count: int = 3) -> Dict[str, Any]:
-    """Analyze players in a note using GPT-4o and store the results"""
+def parse_gpt_player_response(raw_response: str) -> Dict:
+    """Parse the raw GPT response and extract JSON content"""
     try:
+        # Clean the response first
+        cleaned_result = raw_response.strip()
+        if cleaned_result.startswith("```json"):
+            cleaned_result = cleaned_result.replace("```json", "", 1)
+            if cleaned_result.endswith("```"):
+                cleaned_result = cleaned_result[:-3]
+        elif cleaned_result.startswith("```"):
+            cleaned_result = cleaned_result.replace("```", "", 1)
+            if cleaned_result.endswith("```"):
+                cleaned_result = cleaned_result[:-3]
+        
+        # Find the JSON part
+        json_start = cleaned_result.find('{')
+        json_end = cleaned_result.rfind('}')
+        
+        if json_start >= 0 and json_end > json_start:
+            cleaned_result = cleaned_result[json_start:json_end+1]
+        
+        # Parse the JSON
+        analysis_result = json.loads(cleaned_result)
+        
+        # Validate the result - handle both "players" and "missed_players" format
+        if "players" not in analysis_result and "missed_players" not in analysis_result:
+            print(f"[ANALYSIS] Invalid response format (missing players or missed_players array): {cleaned_result[:200]}")
+            # Create a default structure with empty arrays
+            analysis_result = {"players": [], "missed_players": []}
+        
+        # Ensure "players" exists even if only "missed_players" is in the response
+        if "players" not in analysis_result:
+            analysis_result["players"] = []
+            
+        # Ensure "missed_players" exists even if only "players" is in the response
+        if "missed_players" not in analysis_result:
+            analysis_result["missed_players"] = []
+            
+        return analysis_result
+    
+    except json.JSONDecodeError as e:
+        print(f"[ANALYSIS] JSON decode error: {e}")
+        print(f"[ANALYSIS] Attempted to parse: {raw_response[:200]}...")
+        # Return empty result on failure
+        return {"players": [], "missed_players": []}
+    
+    except Exception as e:
+        print(f"[ANALYSIS] Error parsing GPT response: {e}")
+        # Return empty result on failure
+        return {"players": [], "missed_players": []}
+
+async def analyze_players_in_note(note_id: str, user_id: str, retry_count: int = 3, is_update: bool = False) -> Dict[str, Any]:
+    """
+    Analyze players in a note using GPT-4o and store the results
+    
+    Args:
+        note_id: The ID of the note to analyze
+        user_id: The user ID of the note owner
+        retry_count: Number of retries for GPT calls
+        is_update: Whether this is being called during a transcript update
+                  (if True, matching to existing players is skipped)
+    """
+    try:
+        # Log start of player analysis
+        print(f"[PLAYERS] Starting player analysis for note {note_id} (is_update={is_update})")
+        
+        # Get fresh database connections for this operation
+        print(f"[PLAYERS] Getting fresh database connections for note {note_id}")
+        conn = get_fresh_connection()
+        p_collection = conn['players']
+        pn_collection = conn['players_notes']
+        n_collection = conn['notes']
+        fresh_db = conn['db']
+        
+        # If this is an update, verify cleanup was done
+        if is_update:
+            # Double check that there are no existing player notes for this note
+            existing_notes = await pn_collection.count_documents({"note_id": note_id})
+            if existing_notes > 0:
+                print(f"[PLAYERS] WARNING: Found {existing_notes} player notes for note {note_id} - should be 0 in update mode!")
+                print(f"[PLAYERS] Ensuring cleanup of existing player notes")
+                try:
+                    # Emergency cleanup - should've been done already but just in case
+                    await pn_collection.delete_many({"note_id": note_id})
+                    
+                    # Also check for any players still referencing this note
+                    players_with_refs = await p_collection.find({"notes.note_id": note_id}).to_list(length=100)
+                    for player in players_with_refs:
+                        await p_collection.update_one(
+                            {"_id": player["_id"]},
+                            {"$pull": {"notes": {"note_id": note_id}}}
+                        )
+                    print(f"[PLAYERS] Emergency cleanup completed for {len(players_with_refs)} players")
+                except Exception as ex:
+                    print(f"[PLAYERS] Error during emergency cleanup: {ex}")
+        
         # Get the note
         note_obj_id = ObjectId(note_id)
         # Try to find the note with the user_id as is (UUID format)
-        note = await notes_collection.find_one({"_id": note_obj_id, "user_id": user_id})
+        note = await n_collection.find_one({"_id": note_obj_id, "user_id": user_id})
         
         # If not found, try with ObjectId conversion as fallback (for backward compatibility)
         if not note:
@@ -359,200 +512,291 @@ async def analyze_players_in_note(note_id: str, user_id: str, retry_count: int =
             return {"success": False, "message": "No transcript found in note"}
             
         # Get the user's language preference
-        user = await db.users.find_one({"user_id": user_id})
+        user = await fresh_db.users.find_one({"user_id": user_id})
         language = user.get("notes_language", "en") if user else "en"
         print(f"[ANALYSIS] Using language {language} for player analysis")
         
+        # Initialize player_names to empty list
+        player_names = []
+        
         # Get available players
-        available_players = await get_available_players(user_id)
-        player_names = [player["name"] for player in available_players]
-        
-        print(f"[ANALYSIS] Available players for user {user_id}: {player_names}")
-        
-        # Create the prompt with more emphasis on matching existing players
+        available_players = []
+        if not is_update:
+            # Only retrieve existing players when not updating
+            available_players = await get_available_players(user_id)
+            player_names = [player["name"] for player in available_players]
+            print(f"[ANALYSIS] Available players for user {user_id}: {player_names}")
+        else:
+            # If this is an update, we don't want to match to existing players
+            print(f"[ANALYSIS] Update mode: Not matching to existing players")
+            
+        # Create the prompt - without requiring matching to existing players during update
+        if is_update:
+            # For updates, don't try to match existing players but focus on extracting all players
+            system_message = f"""You are a poker analysis expert. Your task is to extract and analyze ALL players mentioned in the transcript.
+For each player:
+1. Extract their exact name as mentioned
+2. Analyze their play style, decisions, and strategic patterns
+3. Return a detailed analysis in {language}
+
+IMPORTANT: Extract EVERY player mentioned in the transcript, including those mentioned only once.
+Format your response as valid JSON with a 'players' array."""
+        else:
+            # For regular analysis, try to match to existing players
+            system_message = f"You are a poker analysis expert. Analyze players from the transcript and return valid JSON. ALL content must be in {language}. If any player name matches or is similar to one in this list: {', '.join(player_names)}, use the exact name from the list."
+                
         prompt = PLAYER_ANALYSIS_PROMPT.format(
             transcript=transcript,
-            available_players=", ".join(player_names)
+            available_players=", ".join(player_names) if player_names else ""
         )
         
-        # Try to get analysis from GPT with retries
-        analysis_result = None
-        raw_response = ""
-        
+        # Try multiple times to get a valid GPT response with players
         for attempt in range(retry_count):
-            print(f"[ANALYSIS] Attempt {attempt+1} to analyze players with GPT-4o")
-            
-            # Call GPT-4o with the prompt
-            raw_response = await get_gpt_response(
-                prompt=prompt,
-                system_message=f"You are a poker analysis expert. Analyze players from the transcript and return valid JSON. ALL content must be in {language}. If any player name matches or is similar to one in this list: {', '.join(player_names)}, use the exact name from the list."
-            )
-            
-            # Try to parse JSON from the response
             try:
-                # Clean the response first
-                cleaned_result = raw_response.strip()
-                if cleaned_result.startswith("```json"):
-                    cleaned_result = cleaned_result.replace("```json", "", 1)
-                    if cleaned_result.endswith("```"):
-                        cleaned_result = cleaned_result[:-3]
-                elif cleaned_result.startswith("```"):
-                    cleaned_result = cleaned_result.replace("```", "", 1)
-                    if cleaned_result.endswith("```"):
-                        cleaned_result = cleaned_result[:-3]
-                
-                # Find the JSON part
-                json_start = cleaned_result.find('{')
-                json_end = cleaned_result.rfind('}')
-                
-                if json_start >= 0 and json_end > json_start:
-                    cleaned_result = cleaned_result[json_start:json_end+1]
-                
-                # Parse the JSON
-                analysis_result = json.loads(cleaned_result)
-                print(f"[ANALYSIS] Successfully parsed JSON response")
-                
-                # Validate the result
-                if "players" not in analysis_result or not isinstance(analysis_result["players"], list):
-                    print(f"[ANALYSIS] Invalid response format (missing players array): {cleaned_result[:200]}")
-                    analysis_result = None
-                    continue
-                
-                # If we got valid JSON with players, break the loop
-                if analysis_result.get("players"):
-                    print(f"[ANALYSIS] Successfully parsed JSON with {len(analysis_result['players'])} players")
-                    break
-                else:
-                    print(f"[ANALYSIS] Empty players list in response, retrying...")
-                    analysis_result = None
-                
-            except json.JSONDecodeError as e:
-                print(f"[ANALYSIS] JSON decode error on attempt {attempt+1}: {e}")
-                print(f"[ANALYSIS] Attempted to parse: {raw_response[:200]}...")
-                await asyncio.sleep(2)  # Wait before retrying
-            except Exception as e:
-                print(f"[ANALYSIS] Error in GPT analysis attempt {attempt+1}: {e}")
-                await asyncio.sleep(2)  # Wait before retrying
-        
-        # If we failed to get a valid analysis, create a fallback
-        if not analysis_result:
-            print(f"[ANALYSIS] Failed to get valid analysis after {retry_count} attempts. Creating fallback analysis.")
-            
-            # Create a very simple fallback analysis by looking for potential player names in the transcript
-            words = transcript.split()
-            potential_players = []
-            
-            for word in words:
-                # Simple heuristic: words that start with uppercase and aren't common words might be names
-                if word and word[0].isupper() and len(word) > 2 and word.lower() not in ["the", "and", "but", "for", "with"]:
-                    potential_players.append(word)
-            
-            # Remove duplicates
-            potential_players = list(set(potential_players))
-            
-            # Create a fallback analysis
-            analysis_result = {
-                "players": [
-                    {
-                        "playername": player,
-                        "description_text": f"{player} appeared in the transcript but no detailed analysis could be generated.",
-                        "description_html": f"<p><strong>{player}</strong> appeared in the transcript but no detailed analysis could be generated.</p>"
-                    } for player in potential_players[:5]  # Limit to first 5 potential players
-                ]
-            }
-            
-            print(f"[ANALYSIS] Created fallback analysis with {len(analysis_result['players'])} potential players")
-        
-        # Now process each player from the analysis
-        player_notes = []
-        print(f"[ANALYSIS] Processing {len(analysis_result.get('players', []))} players from analysis")
-        
-        # Create a mapping of player names for exact case matching
-        # We'll use a database query for matching instead of a map
-        
-        for player_data in analysis_result.get("players", []):
-            try:
-                # Extract player name from the analysis
-                raw_player_name = player_data.get("playername", "").strip()
-                if not raw_player_name:
-                    print(f"[ANALYSIS] Skipping player with empty name")
-                    continue
-                
-                # Set player name
-                player_name = raw_player_name
-                
-                # Find if this matches an existing player (case-insensitive)
-                existing_player = await players_collection.find_one({
-                    "user_id": user_id,
-                    "name": {"$regex": f"^{re.escape(raw_player_name)}$", "$options": "i"}
-                })
-                
-                if existing_player:
-                    # Use the existing name with its original case
-                    player_name = existing_player["name"]
-                    print(f"[ANALYSIS] Matched player name '{raw_player_name}' to existing player '{player_name}'")
-                
-                # Create or update the player record
-                player_id, is_new = await create_or_update_player(user_id, player_name, player_data)
-                if not player_id:
-                    print(f"[ANALYSIS] Failed to create/update player: {player_name}")
-                    continue
-                
-                # Create player note document
-                player_note = {
-                    "user_id": user_id,
-                    "player_id": player_id,
-                    "note_id": note_obj_id,
-                    "player_name": player_name,
-                    "description_text": player_data.get("description_text", ""),
-                    "description_html": player_data.get("description_html", ""),
-                    "createdAt": datetime.utcnow(),
-                    "updatedAt": datetime.utcnow()
-                }
-                
-                # Insert into players_notes collection
-                result = await players_notes_collection.insert_one(player_note)
-                player_note_id = result.inserted_id
-                print(f"[ANALYSIS] Created player note with ID: {player_note_id}")
-                
-                # Update the player record to add this player_note_id and note_id
-                # Create player data with player note ID for proper linking
-                updated_player_data = {"player_note_id": player_note_id, "note_id": note_obj_id}
-                await players_collection.update_one(
-                    {"_id": player_id},
-                    {"$push": {"notes": {"player_note_id": str(player_note_id), "note_id": str(note_obj_id)}}}
+                # Get GPT response with poker analysis
+                raw_response = await get_gpt_response(
+                    prompt=prompt,
+                    system_message=system_message
                 )
-                print(f"[ANALYSIS] Linked player note ID {player_note_id} to player {player_id}")
                 
-                # Add formatted player note to results
-                formatted_player_note = {
-                    "id": str(player_note_id),
-                    "player_id": str(player_id),
-                    "player_name": player_name,
-                    "players_notes_count": 1,  # Set to 1 for newly created player notes
-                    "description_text": player_data.get("description_text", ""),
-                    "description_html": player_data.get("description_html", ""),
-                    "created_at": datetime.utcnow().isoformat()
-                }
-                player_notes.append(formatted_player_note)
-                
+                # Parse the JSON from the GPT response
+                result_json = parse_gpt_player_response(raw_response)
+                if result_json.get("players", []):
+                    player_count = len(result_json.get("players", []))
+                    print(f"[ANALYSIS] Successfully parsed JSON with {player_count} players")
+                    
+                    # Perform a follow-up analysis to find any missed players
+                    print(f"[ANALYSIS] Performing follow-up analysis to find any missed players")
+                    
+                    try:
+                        # Create a summary of the first analysis to include in the follow-up prompt
+                        first_analysis_summary = json.dumps({"players": [{"playername": p["playername"]} for p in result_json.get("players", [])]})
+                        
+                        # Create the follow-up prompt
+                        followup_prompt = PLAYER_ANALYSIS_FOLLOWUP_PROMPT.format(
+                            first_analysis=first_analysis_summary,
+                            transcript=transcript,
+                            available_players=", ".join(player_names) if player_names else ""
+                        )
+                        
+                        # Get follow-up GPT response with a timeout to prevent blocking
+                        followup_raw_response = await asyncio.wait_for(
+                            get_gpt_response(
+                                prompt=followup_prompt,
+                                system_message=f"You are a poker analysis expert. Your task is to find ANY missed players from the transcript that weren't caught in the first analysis. Return valid JSON. ALL content must be in {language}."
+                            ),
+                            timeout=60  # 60 second timeout for the follow-up request
+                        )
+                        
+                        # Parse the follow-up response
+                        followup_json = parse_gpt_player_response(followup_raw_response)
+                        missed_players = followup_json.get("missed_players", [])
+                        
+                        if missed_players:
+                            print(f"[ANALYSIS] Found {len(missed_players)} additional players in follow-up analysis")
+                            
+                            # Add the missed players to the original result
+                            result_json["players"].extend(missed_players)
+                            print(f"[ANALYSIS] Combined result now has {len(result_json['players'])} players")
+                        else:
+                            print(f"[ANALYSIS] No additional players found in follow-up analysis")
+                    except asyncio.TimeoutError:
+                        print(f"[ANALYSIS] Follow-up analysis timed out, continuing with original players")
+                    except Exception as e:
+                        print(f"[ANALYSIS] Error during follow-up analysis: {e}")
+                        print(f"[ANALYSIS] Traceback: {traceback.format_exc()}")
+                        print(f"[ANALYSIS] Continuing with original players")
+                    
+                    # Process the combined players result
+                    player_notes = await process_players_analysis(result_json, note_id, user_id, transcript, is_update=is_update)
+                    
+                    # Return the result
+                    return {
+                        "success": True,
+                        "player_notes": player_notes
+                    }
+                else:
+                    if attempt < retry_count - 1:
+                        print(f"[ANALYSIS] No players found in analysis attempt {attempt+1}, retrying...")
+                        continue
+                    else:
+                        print(f"[ANALYSIS] No players found after {retry_count} attempts")
+                        return {
+                            "success": True,
+                            "message": "No players identified in transcript",
+                            "player_notes": []
+                        }
+            except json.JSONDecodeError as json_err:
+                print(f"[ANALYSIS] JSON parse error on attempt {attempt+1}: {json_err}")
+                if attempt < retry_count - 1:
+                    continue
+                else:
+                    return {
+                        "success": False,
+                        "message": f"Failed to parse player analysis after {retry_count} attempts",
+                        "error": str(json_err)
+                    }
             except Exception as e:
-                print(f"[ANALYSIS] Error processing player {player_data.get('playername', 'unknown')}: {e}")
+                print(f"[ANALYSIS] Error processing player analysis on attempt {attempt+1}: {e}")
+                traceback.print_exc()
                 print(f"[ANALYSIS] Traceback: {traceback.format_exc()}")
-        
-        return {
-            "success": True,
-            "player_notes": player_notes
-        }
-    
+                if attempt < retry_count - 1:
+                    continue
+                else:
+                    return {
+                        "success": False,
+                        "message": f"Error processing player analysis after {retry_count} attempts",
+                        "error": str(e)
+                    }
+                
     except Exception as e:
         print(f"[ANALYSIS] Error analyzing players in note: {e}")
+        traceback.print_exc()
         print(f"[ANALYSIS] Traceback: {traceback.format_exc()}")
         return {
             "success": False,
             "message": str(e),
             "player_notes": []
         }
+
+async def process_players_analysis(result: Dict, note_id: str, user_id: str, transcript: str, is_update: bool = False) -> List[Dict]:
+    """Process the player analysis result and store player notes"""
+    players = result.get("players", [])
+    print(f"[ANALYSIS] Processing {len(players)} players from analysis")
+    
+    # Now process each player from the analysis
+    player_notes = []
+
+    # Get fresh connections for this operation
+    print(f"[ANALYSIS] Getting fresh database connections for note {note_id}")
+    conn = get_fresh_connection()
+    p_collection = conn['players']
+    pn_collection = conn['players_notes']
+    
+    # If this is an update, ensure all player references are properly deleted first
+    # We're adding this as a double-check since the deletion in update_transcript_directly sometimes might not be complete
+    if is_update:
+        try:
+            print(f"[ANALYSIS] Double-checking cleanup for note {note_id} (update mode)")
+            
+            # First ensure all player notes for this note are deleted
+            delete_result = await pn_collection.delete_many({"note_id": note_id})
+            print(f"[ANALYSIS] Deleted {delete_result.deleted_count} lingering player notes during double-check")
+            
+            # Also ensure all player references to this note are removed
+            # Find players with references to this note
+            players_with_refs = await p_collection.find(
+                {"notes.note_id": note_id}
+            ).to_list(length=100)
+            
+            if players_with_refs:
+                print(f"[ANALYSIS] Found {len(players_with_refs)} players still referencing note {note_id}")
+                for player in players_with_refs:
+                    try:
+                        # Remove references to this note from each player
+                        await p_collection.update_one(
+                            {"_id": player["_id"]},
+                            {"$pull": {"notes": {"note_id": note_id}}}
+                        )
+                    except Exception as e:
+                        print(f"[ANALYSIS] Error removing note reference from player {player['_id']}: {e}")
+        except Exception as cleanup_ex:
+            print(f"[ANALYSIS] Error during additional cleanup: {cleanup_ex}")
+            # Continue with processing even if cleanup fails
+    
+    for player_data in players:
+        try:
+            # Extract player name from the analysis
+            player_name = player_data.get("playername", "").strip()
+            if not player_name:
+                print(f"[ANALYSIS] Skipping player with missing name: {player_data}")
+                continue
+                
+            # Extract descriptions, defaulting to empty strings if missing
+            description_text = player_data.get("description_text", "").strip()
+            description_html = player_data.get("description_html", "").strip()
+            
+            if not description_text:
+                # Generate a basic description if none provided
+                description_text = f"{player_name} appeared in this hand."
+                description_html = f"<p>{player_name} appeared in this hand.</p>"
+                
+            # Match to existing player or create a new one
+            player_id = None
+            
+            if is_update:
+                # In update mode, we always create new player records
+                print(f"[PLAYER] Creating new player: {player_name}")
+                player_result = await create_or_update_player(user_id, player_name, custom_collection=p_collection)
+                # Extract just the player_id from the tuple (player_id, is_new)
+                player_id = player_result[0] if player_result and player_result[0] else None
+            else:
+                # Try to match to an existing player by name
+                existing_players = await p_collection.find({"user_id": user_id, "name": {"$regex": f"^{re.escape(player_name)}$", "$options": "i"}}).to_list(length=1)
+                
+                if existing_players:
+                    matched_player = existing_players[0]
+                    player_id = matched_player["_id"]
+                    print(f"[ANALYSIS] Matched player name '{player_name}' to existing player '{matched_player['name']}'")
+                    print(f"[PLAYER] Updating existing player: {matched_player['name']}")
+                else:
+                    # Create new player
+                    print(f"[PLAYER] Creating new player: {player_name}")
+                    player_result = await create_or_update_player(user_id, player_name, custom_collection=p_collection)
+                    # Extract just the player_id from the tuple (player_id, is_new)
+                    player_id = player_result[0] if player_result and player_result[0] else None
+            
+            if not player_id:
+                print(f"[ANALYSIS] Failed to create or match player: {player_name}")
+                continue
+                
+            # Create the player note
+            player_note_doc = {
+                "user_id": user_id,
+                "player_id": str(player_id),
+                "player_name": player_name,
+                "note_id": note_id,
+                "description_text": description_text,
+                "description_html": description_html,
+                "created_at": datetime.utcnow()
+            }
+            
+            # Insert the player note
+            player_note_result = await pn_collection.insert_one(player_note_doc)
+            player_note_id = player_note_result.inserted_id
+            print(f"[ANALYSIS] Created player note with ID: {player_note_id}")
+            
+            # Update player document with link to this note
+            note_ref = {
+                "note_id": note_id,
+                "player_note_id": str(player_note_id),
+                "created_at": datetime.utcnow()
+            }
+            
+            # Use the correct ObjectId for the player update
+            await p_collection.update_one(
+                {"_id": player_id},  # player_id is already an ObjectId
+                {"$push": {"notes": note_ref}}
+            )
+            print(f"[ANALYSIS] Linked player note ID {player_note_id} to player {player_id}")
+            
+            # Add to the response
+            player_notes.append({
+                "id": str(player_note_id),
+                "player_id": str(player_id),
+                "player_name": player_name,
+                "players_notes_count": 1,  # We don't have this info readily available
+                "description_text": description_text,
+                "description_html": description_html,
+                "created_at": datetime.utcnow().isoformat()
+            })
+            
+        except Exception as e:
+            print(f"[ANALYSIS] Error processing player {player_data.get('playername', 'unknown')}: {e}")
+            traceback.print_exc()
+            print(f"[ANALYSIS] Traceback: {traceback.format_exc()}")
+    
+    return player_notes
 
 @router.post("/notes/{note_id}/analyze-players")
 async def analyze_players_endpoint(note_id: str, user_id: str = Header(None)):

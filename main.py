@@ -21,6 +21,13 @@ from players_apis.player_analysis_get_apis import router as player_analysis_get_
 from players_apis.player_delete_apis import router as player_delete_router  # Import for player delete APIs
 # Remove all hand-related imports and players_apis
 
+# Import Celery app for task management
+# This is just to ensure Celery is initialized when the app starts
+from cel_main import app as celery_app
+
+# Create Celery instance reference
+celery = celery_app
+
 # Load environment variables
 load_dotenv()
 
@@ -95,12 +102,12 @@ analysis_cache = AnalysisCache(expiry_minutes=60)
 @app.on_event("startup")
 async def startup_event():
     try:
-        from audio_processing.player_notes_api import ensure_indexes as ensure_player_notes_indexes
+        from audio_processing.player_notes_api import setup_indexes as setup_player_notes_indexes
         from audio_processing.player_analysis_api import ensure_indexes as ensure_player_analysis_indexes
         
         # Ensure database indexes exist
         try:
-            await ensure_player_notes_indexes()
+            await setup_player_notes_indexes()
         except Exception as e:
             print(f"Warning: Error creating player notes indexes: {e}")
             
