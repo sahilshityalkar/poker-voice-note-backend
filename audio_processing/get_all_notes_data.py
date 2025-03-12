@@ -106,7 +106,10 @@ async def get_all_notes_with_players(user_id: str = Header(None)):
             # Get all player notes for this note
             player_notes = []
             note_id = note["_id"]
-            async for player_note in players_notes_collection.find({"note_id": note_id, "user_id": user_id}):
+            
+            # Use string representation of note_id for query
+            note_id_str = str(note_id)
+            async for player_note in players_notes_collection.find({"note_id": note_id_str, "user_id": user_id}):
                 # Serialize player note ObjectIds to strings
                 player_note_serialized = {k: serialize_object_id(v) for k, v in player_note.items()}
                 player_notes.append(player_note_serialized)
@@ -150,7 +153,10 @@ async def get_latest_note_with_players(user_id: str = Header(None)):
         # Get all player notes for this note
         player_notes = []
         note_id = note["_id"]
-        async for player_note in players_notes_collection.find({"note_id": note_id, "user_id": user_id}):
+        
+        # Use string representation of note_id for query
+        note_id_str = str(note_id)
+        async for player_note in players_notes_collection.find({"note_id": note_id_str, "user_id": user_id}):
             # Serialize player note ObjectIds to strings
             player_note_serialized = {k: serialize_object_id(v) for k, v in player_note.items()}
             player_notes.append(player_note_serialized)
@@ -194,7 +200,8 @@ async def get_note_with_player_notes(note_id: str, user_id: str = Header(None)):
         
         # Find all player notes associated with this note
         player_notes = []
-        async for player_note in players_notes_collection.find({"note_id": note_object_id, "user_id": user_id}):
+        # Use string representation of note_id for query
+        async for player_note in players_notes_collection.find({"note_id": note_id, "user_id": user_id}):
             # Serialize player note ObjectIds to strings
             player_note_serialized = {k: serialize_object_id(v) for k, v in player_note.items()}
             player_notes.append(player_note_serialized)
