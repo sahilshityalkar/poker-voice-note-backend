@@ -61,10 +61,9 @@ async def get_players_with_last_analysis(user_id: str = Header(None)):
             
             # Get the most recent analysis for this player
             player_id = player["_id"]
-            # Use string representation of player_id for query
-            player_id_str = str(player_id)
+            # Query using the ObjectId directly for player_analysis_collection
             recent_analysis = await player_analysis_collection.find_one(
-                {"player_id": player_id_str, "user_id": user_id},
+                {"player_id": player_id, "user_id": user_id},
                 sort=[("createdAt", -1)]  # Sort by createdAt in descending order
             )
             
@@ -113,6 +112,7 @@ async def get_player_details_with_notes(player_id: str, user_id: str = Header(No
         player_serialized = {k: serialize_object_id(v) for k, v in player.items()}
         
         # Get the most recent analysis for this player
+        # Query using the ObjectId directly for player_analysis_collection
         player_analysis = await player_analysis_collection.find_one(
             {"player_id": player_object_id, "user_id": user_id},
             sort=[("createdAt", -1)]  # Sort by createdAt in descending order
