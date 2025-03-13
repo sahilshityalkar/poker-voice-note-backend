@@ -135,11 +135,22 @@ async def delete_player_complete(player_id: str, user_id: str = Header(None)) ->
         
         player_name = player['name']
         
-        # Delete all notes for this player
-        notes_delete_result = await players_notes_collection.delete_many({
+        # Delete all notes for this player - try both ObjectId and string formats to ensure we get all notes
+        # Some notes might store player_id as ObjectId, others as string
+        notes_delete_result_obj = await players_notes_collection.delete_many({
             "player_id": player_obj_id,
             "user_id": user_id
         })
+        
+        notes_delete_result_str = await players_notes_collection.delete_many({
+            "player_id": str(player_obj_id),
+            "user_id": user_id
+        })
+        
+        # Combine the delete counts
+        notes_deleted_count = notes_delete_result_obj.deleted_count + notes_delete_result_str.deleted_count
+        
+        print(f"[DELETE] Deleted {notes_delete_result_obj.deleted_count} notes with ObjectId and {notes_delete_result_str.deleted_count} notes with string ID for player {player_name}")
         
         # Delete the player analysis record
         analysis_delete_result = await player_analysis_collection.delete_many({
@@ -157,7 +168,7 @@ async def delete_player_complete(player_id: str, user_id: str = Header(None)) ->
             "success": True,
             "message": f"Player {player_name} and all their notes deleted successfully",
             "player_deleted": player_delete_result.deleted_count > 0,
-            "notes_deleted_count": notes_delete_result.deleted_count,
+            "notes_deleted_count": notes_deleted_count,
             "analysis_deleted_count": analysis_delete_result.deleted_count
         }
         
