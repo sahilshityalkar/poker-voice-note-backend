@@ -18,6 +18,7 @@ db = client.pokernotes
 # Collections
 players_collection = db.players
 players_notes_collection = db.players_notes
+player_analysis_collection = db.player_analysis
 
 @router.delete("/players/{player_id}")
 async def delete_player(player_id: str, user_id: str = Header(None)) -> Dict[str, Any]:
@@ -43,13 +44,20 @@ async def delete_player(player_id: str, user_id: str = Header(None)) -> Dict[str
         # Delete the player
         delete_result = await players_collection.delete_one({"_id": player_obj_id, "user_id": user_id})
         
+        # Delete the player analysis record
+        analysis_delete_result = await player_analysis_collection.delete_many({
+            "player_id": player_obj_id,
+            "user_id": user_id
+        })
+        
         if delete_result.deleted_count == 0:
             raise HTTPException(status_code=404, detail="Player not found or not deleted")
         
         return {
             "success": True,
             "message": f"Player {player['name']} deleted successfully",
-            "deleted_count": delete_result.deleted_count
+            "deleted_count": delete_result.deleted_count,
+            "analysis_deleted_count": analysis_delete_result.deleted_count
         }
         
     except HTTPException:
@@ -108,6 +116,7 @@ async def delete_player_complete(player_id: str, user_id: str = Header(None)) ->
     """
     Delete both a player and all their notes.
     This is a convenience endpoint that combines the functionality of the two endpoints above.
+    Also deletes the player analysis record.
     """
     try:
         if not user_id:
@@ -132,6 +141,12 @@ async def delete_player_complete(player_id: str, user_id: str = Header(None)) ->
             "user_id": user_id
         })
         
+        # Delete the player analysis record
+        analysis_delete_result = await player_analysis_collection.delete_many({
+            "player_id": player_obj_id,
+            "user_id": user_id
+        })
+        
         # Delete the player
         player_delete_result = await players_collection.delete_one({
             "_id": player_obj_id,
@@ -142,7 +157,8 @@ async def delete_player_complete(player_id: str, user_id: str = Header(None)) ->
             "success": True,
             "message": f"Player {player_name} and all their notes deleted successfully",
             "player_deleted": player_delete_result.deleted_count > 0,
-            "notes_deleted_count": notes_delete_result.deleted_count
+            "notes_deleted_count": notes_delete_result.deleted_count,
+            "analysis_deleted_count": analysis_delete_result.deleted_count
         }
         
     except HTTPException:
@@ -190,6 +206,7 @@ async def delete_all_players(user_id: str = Header(None)) -> Dict[str, Any]:
     """
     Delete all players and their notes for a specific user.
     This will remove all player records and all their associated notes.
+    Also deletes all player analysis records.
     """
     try:
         if not user_id:
@@ -204,6 +221,11 @@ async def delete_all_players(user_id: str = Header(None)) -> Dict[str, Any]:
             "user_id": user_id
         })
         
+        # Delete all player analysis records for this user
+        analysis_delete_result = await player_analysis_collection.delete_many({
+            "user_id": user_id
+        })
+        
         # Delete all players for this user
         players_delete_result = await players_collection.delete_many({
             "user_id": user_id
@@ -213,7 +235,8 @@ async def delete_all_players(user_id: str = Header(None)) -> Dict[str, Any]:
             "success": True,
             "message": f"All players and their notes for user deleted successfully",
             "players_deleted_count": players_delete_result.deleted_count,
-            "notes_deleted_count": notes_delete_result.deleted_count
+            "notes_deleted_count": notes_delete_result.deleted_count,
+            "analysis_deleted_count": analysis_delete_result.deleted_count
         }
         
     except HTTPException:
@@ -227,10 +250,16 @@ async def delete_all_players_only(user_id: str = Header(None)) -> Dict[str, Any]
     """
     Delete only player records for a specific user.
     This will remove all player records from the players collection but keep their notes in the players_notes collection.
+    Also deletes all player analysis records.
     """
     try:
         if not user_id:
             raise HTTPException(status_code=400, detail="User ID is required")
+        
+        # Delete all player analysis records for this user
+        analysis_delete_result = await player_analysis_collection.delete_many({
+            "user_id": user_id
+        })
         
         # Delete all players for this user
         players_delete_result = await players_collection.delete_many({
@@ -240,7 +269,8 @@ async def delete_all_players_only(user_id: str = Header(None)) -> Dict[str, Any]
         return {
             "success": True,
             "message": f"All player records deleted successfully (notes preserved)",
-            "players_deleted_count": players_delete_result.deleted_count
+            "players_deleted_count": players_delete_result.deleted_count,
+            "analysis_deleted_count": analysis_delete_result.deleted_count
         }
         
     except HTTPException:
