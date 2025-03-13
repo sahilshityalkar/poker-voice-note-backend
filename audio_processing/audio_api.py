@@ -171,6 +171,15 @@ async def get_transcript_from_deepgram(file_path: Path, content_type: str, langu
 async def process_audio_file(file_path: Path, content_type: str, user_id: str) -> Dict[str, Any]:
     """Process an audio file, either from a local path or a GCS URI."""
     try:
+        # Get user's language preference first
+        user = await user_collection.find_one({"user_id": user_id})
+        if not user:
+            print(f"[USER] User not found with user_id: {user_id}")
+            raise HTTPException(status_code=404, detail="User not found")
+            
+        language = user.get("notes_language", "en")  # Default to English if not set
+        print(f"[AUDIO] Processing audio for user {user_id} in language: {language}")
+        
         # Check if the file_path is a GCS URI
         if isinstance(file_path, str) and file_path.startswith("gs://"):
             # Extract the bucket name and blob name from the GCS URI
@@ -192,22 +201,13 @@ async def process_audio_file(file_path: Path, content_type: str, user_id: str) -
                 method="GET"
             )
             
-            # Use the signed URL for transcription
-            transcript = await get_transcript_from_deepgram_url(signed_url, "en")
+            # Use the signed URL for transcription with the user's language preference
+            transcript = await get_transcript_from_deepgram_url(signed_url, language)
         else:
             # Handle local file (existing behavior)
             if isinstance(file_path, str):
                 file_path = Path(file_path)
-            transcript = await get_transcript_from_deepgram(file_path, content_type)
-        
-        # Get user's language preference
-        user = await user_collection.find_one({"user_id": user_id})
-        if not user:
-            print(f"[USER] User not found with user_id: {user_id}")
-            raise HTTPException(status_code=404, detail="User not found")
-            
-        language = user.get("notes_language", "en")  # Default to English if not set
-        print(f"[AUDIO] Processing audio for user {user_id} in language: {language}")
+            transcript = await get_transcript_from_deepgram(file_path, content_type, language)
         
         # Check if transcript is empty and terminate early if it is
         if not transcript or transcript.strip() == "":
