@@ -29,7 +29,7 @@ IMPORTANT: Extract EVERY player mentioned in the transcript, including those men
 Format your response as valid JSON with a 'players' array."""
 
     # Prompt template
-    prompt = """Analyze the poker players mentioned in this transcript and provide a detailed breakdown of each player's:
+    prompt = f"""Analyze the poker players mentioned in this transcript and provide a detailed breakdown of each player's:
 
 1. Preflop strategy (tight/loose, passive/aggressive)
 2. Postflop tendencies (betting patterns, bluffing frequency)
@@ -37,17 +37,20 @@ Format your response as valid JSON with a 'players' array."""
 4. Strategic leaks & tilt detection
 5. Exploitation strategies
 
+IMPORTANT INSTRUCTION: Your ENTIRE response including ALL descriptions and analysis MUST be in {user_language}. Do NOT use any English in your response.
+
 For each player, format your response as a JSON object with these fields:
-- playername: The player's name
-- description_text: A detailed plain text analysis (500-800 chars)
-- description_html: The same analysis in simple HTML with paragraph tags and basic formatting
+- playername: The player's name 
+- description_text: A detailed plain text analysis (500-800 chars) in {user_language}
+- description_html: The same analysis in simple HTML with paragraph tags and basic formatting in {user_language}
 
 Transcript:
-{transcript}
+{{transcript}}
 
-{available_players_text}
+{{available_players_text}}
 
 Return ONLY valid JSON containing an array of player objects. Each player object should include playername, description_text, and description_html.
+All text content MUST be in {user_language}.
 """
     
     formatted_prompt = prompt.format(
@@ -99,54 +102,42 @@ Focus on these potential reasons for missed players:
 5. Names that might be confused with other terms
 6. Referenced players who didn't take obvious actions
 
-PLAYER IDENTIFICATION GUIDELINES:
-1. A player is ANYONE who is:
-   - Taking poker actions (bet, raise, fold, check, call)
-   - Described as having cards or a hand
-   - Referred to as being in a position (SB, BB, button, etc.)
-   - Mentioned as winning or losing a pot
-   - Described in terms of their play style or strategy
+IMPORTANT INSTRUCTION: Your ENTIRE response including ALL players' descriptions and analysis MUST be in {language}. Do NOT use any English in your response.
 
-2. IMPORTANT - MATCHING EXISTING PLAYERS:
-   - If a player name in the transcript seems to match or is similar to one in the available players list, ALWAYS use the EXACT name from the list
-   - Even if there are slight spelling variations or differences in case, use the exact name from the available players list
-   - This ensures consistent player tracking across multiple recordings
-   - The list of available players is: {available_players}
-
-JSON FORMAT:
-If you find ANY missed players, return a valid JSON with ONLY the new players:
+Return a valid JSON object containing only a "missed_players" array (empty if none found):
+```json
 {{
   "missed_players": [
     {{
-      "playername": "ExactPlayerName",
-      "description_text": "Player analysis in clear text format...",
-      "description_html": "<p><strong>Preflop:</strong> Player analysis...</p><p><strong>Postflop:</strong> More analysis...</p>..."
+      "playername": "Player Name",
+      "description_text": "Detailed plain text analysis in {language} (500-800 chars)",
+      "description_html": "The same analysis in {language} with HTML formatting <strong>tags</strong>"
     }}
   ]
 }}
+```
 
-If NO additional players are found, return:
+If no missed players are found, return:
+```json
 {{
   "missed_players": []
 }}
+```
 
-IMPORTANT: Return ONLY valid JSON! No explanation text before or after.
-"""
+ONLY return valid JSON with a 'missed_players' array. All content MUST be in {language}."""
                 
                 formatted_followup_prompt = followup_prompt.format(
                     first_analysis=first_analysis_summary,
                     transcript=transcript,
-                    available_players=", ".join(player_names) if player_names else ""
+                    language=user_language
                 )
                 
                 # Get follow-up GPT response with a timeout to prevent blocking
-                followup_system_message = f"You are a poker analysis expert. Your task is to find ANY missed players from the transcript that weren't caught in the first analysis. Return valid JSON. ALL content must be in {user_language}."
-                
                 followup_raw_response = await asyncio.wait_for(
                     get_gpt_response(
                         prompt=formatted_followup_prompt,
-                        system_message=followup_system_message
-                    ) if not gpt_client else gpt_client.get_completion(formatted_followup_prompt, followup_system_message),
+                        system_message=f"You are a poker analysis expert. Your task is to find ANY missed players from the transcript that weren't caught in the first analysis. Return valid JSON. ALL content must be in {user_language}. Do not use English at all in your response."
+                    ),
                     timeout=60  # 60 second timeout for the follow-up request
                 )
                 

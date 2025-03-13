@@ -167,7 +167,11 @@ async def setup_indexes():
 # Player analysis prompt template
 PLAYER_ANALYSIS_PROMPT = """
 You are a top-level professional quality poker analysis and educator 
-Analyze the entire poker hand history transcript from the user's perspective and extract every insightful detail regarding all players involved. Focus on capturing both the strategic and emotional dimensions of each player's play. Specifically:
+Analyze the entire poker hand history transcript from the user's perspective and extract every insightful detail regarding all players involved. Focus on capturing both the strategic and emotional dimensions of each player's play.
+
+IMPORTANT INSTRUCTION: Your ENTIRE response including ALL player names, descriptions, and analysis MUST be in {language}. Do NOT use any English in your response.
+
+Specifically:
 
 1. Player Analysis: For each player in the transcript (use a placeholder list such as [PLAYER_NAMES] to cover all known players, ensuring no spelling mistakes), evaluate their preflop and postflop decisions, identifying key strategic tendencies.
 2. Metrics Calculation: For opponents, include estimated VPIP (Voluntarily Put Money in Pot) and Aggression Frequency metrics to assess their exploitability.
@@ -202,8 +206,8 @@ Analyze the entire poker hand history transcript from the user's perspective and
    Output your findings as a JSON object (or an array of JSON objects if there are multiple players), where each object contains:
 
 - "playername": The player's name (from the provided placeholder list [PLAYER_NAMES]).
-- "description_text": A concise yet compelling text-formatted summary that includes only the relevant fields. Ensure your text covers the following strong sections.
-- "description_html": A concise yet compelling HTML-formatted summary that includes only the relevant fields. Ensure your HTML covers the following strong sections:
+- "description_text": A concise yet compelling text-formatted summary that includes only the relevant fields. Ensure your text covers the following strong sections. This MUST be in {language}.
+- "description_html": A concise yet compelling HTML-formatted summary that includes only the relevant fields. Ensure your HTML covers the following strong sections. This MUST be in {language}:
   - <strong>Preflop:</strong> Describe the player's actions and range preflop.
   - <strong>Postflop:</strong> Analyze their behavior on the flop, turn, and river.
   - <strong>Metrics:</strong> (For opponents) Provide estimates like VPIP and Aggression Frequency.
@@ -229,6 +233,8 @@ JSON FORMAT:
   ]
 }}
 
+REMEMBER: ALL content MUST be in {language}. This includes player names, descriptions (both text and HTML), analysis - everything.
+
 Example output for a player might look like:
 - Player had limped preflop, suggesting a moderate range
 - Raised on the flop and later went all-in on the river, indicating opportunistic aggression
@@ -239,15 +245,17 @@ Example output for a player might look like:
 Transcript:
 {transcript}
 
-IMPORTANT: Return ONLY valid JSON! No explanation text before or after.
+IMPORTANT: Return ONLY valid JSON! No explanation text before or after. ALL content MUST be in {language}.
 
 Objective:
-Deliver a comprehensive, HTML-enhanced analysis that allows the user to quickly grasp each player's tendencies and adjust their strategy accordingly.
+Deliver a comprehensive, HTML-enhanced analysis that allows the user to quickly grasp each player's tendencies and adjust their strategy accordingly.
 """
 
 # Follow-up player analysis prompt template to find any missed players
 PLAYER_ANALYSIS_FOLLOWUP_PROMPT = """
 You are a top-level professional quality poker analysis and educator. Your task is to review a poker transcript and VERIFY that ALL players have been identified correctly in the initial analysis.
+
+IMPORTANT INSTRUCTION: Your ENTIRE response including ALL player names, descriptions, and analysis MUST be in {language}. Do NOT use any English in your response.
 
 FIRST ANALYSIS RESULTS:
 {first_analysis}
@@ -265,38 +273,29 @@ Focus on these potential reasons for missed players:
 5. Names that might be confused with other terms
 6. Referenced players who didn't take obvious actions
 
-PLAYER IDENTIFICATION GUIDELINES:
-1. A player is ANYONE who is:
-   - Taking poker actions (bet, raise, fold, check, call)
-   - Described as having cards or a hand
-   - Referred to as being in a position (SB, BB, button, etc.)
-   - Mentioned as winning or losing a pot
-   - Described in terms of their play style or strategy
-
-2. IMPORTANT - MATCHING EXISTING PLAYERS:
-   - If a player name in the transcript seems to match or is similar to one in the available players list, ALWAYS use the EXACT name from the list
-   - Even if there are slight spelling variations or differences in case, use the exact name from the available players list
-   - This ensures consistent player tracking across multiple recordings
-   - The list of available players is: {available_players}
-
-JSON FORMAT:
-If you find ANY missed players, return a valid JSON with ONLY the new players:
+Return a valid JSON object containing only a "missed_players" array (empty if none found):
+```json
 {{
   "missed_players": [
     {{
-      "playername": "ExactPlayerName",
-      "description_text": "Player analysis in clear text format...",
-      "description_html": "<p><strong>Preflop:</strong> Player analysis...</p><p><strong>Postflop:</strong> More analysis...</p>..."
+      "playername": "Player Name",
+      "description_text": "Detailed plain text analysis in {language} (500-800 chars)",
+      "description_html": "The same analysis in {language} with HTML formatting <strong>tags</strong>"
     }}
   ]
 }}
+```
 
-If NO additional players are found, return:
+If no missed players are found, return:
+```json
 {{
   "missed_players": []
 }}
+```
 
-IMPORTANT: Return ONLY valid JSON! No explanation text before or after.
+REMEMBER: ALL content MUST be in {language}. This includes player names, descriptions (both text and HTML), analysis - everything.
+
+ONLY return valid JSON with a 'missed_players' array.
 """
 
 async def get_available_players(user_id: str) -> List[Dict[str, str]]:
@@ -540,14 +539,16 @@ For each player:
 3. Return a detailed analysis in {language}
 
 IMPORTANT: Extract EVERY player mentioned in the transcript, including those mentioned only once.
+ALL content including HTML and plain text descriptions MUST be in {language}. Do not use English at all in your response.
 Format your response as valid JSON with a 'players' array."""
         else:
             # For regular analysis, try to match to existing players
-            system_message = f"You are a poker analysis expert. Analyze players from the transcript and return valid JSON. ALL content must be in {language}. If any player name matches or is similar to one in this list: {', '.join(player_names)}, use the exact name from the list."
+            system_message = f"You are a poker analysis expert. Analyze players from the transcript and return valid JSON. ALL content including player names, descriptions and HTML must be in {language}. Do not use English at all in your response. If any player name matches or is similar to one in this list: {', '.join(player_names)}, use the exact name from the list."
                 
         prompt = PLAYER_ANALYSIS_PROMPT.format(
             transcript=transcript,
-            available_players=", ".join(player_names) if player_names else ""
+            available_players=", ".join(player_names) if player_names else "",
+            language=language
         )
         
         # Try multiple times to get a valid GPT response with players
@@ -576,7 +577,8 @@ Format your response as valid JSON with a 'players' array."""
                         followup_prompt = PLAYER_ANALYSIS_FOLLOWUP_PROMPT.format(
                             first_analysis=first_analysis_summary,
                             transcript=transcript,
-                            available_players=", ".join(player_names) if player_names else ""
+                            available_players=", ".join(player_names) if player_names else "",
+                            language=language
                         )
                         
                         # Get follow-up GPT response with a timeout to prevent blocking
