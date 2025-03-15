@@ -8,7 +8,7 @@ from datetime import datetime
 # Import the necessary functions from audio_processing
 from audio_processing.audio_api import process_audio_file
 
-# Try to import nest_asyncio, but don't fail if it's not available
+# Apply nest_asyncio unconditionally - this is critical for handling nested event loops in Celery tasks
 try:
     import nest_asyncio
     # Apply nest_asyncio to allow nested event loops
@@ -16,7 +16,7 @@ try:
     nest_asyncio.apply()
     print("[CELERY] Successfully initialized nest_asyncio")
 except ImportError:
-    print("[CELERY] Warning: nest_asyncio not available. Using standard asyncio.")
+    print("[CELERY] WARNING: nest_asyncio not available. Event loop issues may occur!")
 
 # Debug information
 print(f"[CELERY] Task Python path: {sys.path}")
@@ -49,21 +49,12 @@ def process_audio_task(self, file_path: str, content_type: str, user_id: str) ->
             }
         )
         
-        # Safely create and use an event loop without closing it
+        # Always create a new event loop for each task
+        # This prevents "attached to a different loop" errors
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
         try:
-            # First check if there's a running event loop we can use
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_closed():
-                    print("[CELERY] Existing event loop is closed, creating a new one")
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-            except RuntimeError:
-                # No event loop in this thread, create one
-                print("[CELERY] No event loop in thread, creating a new one")
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                
             # Check if the file path is a GCS URI
             if file_path.startswith("gs://"):
                 # Pass the GCS URI directly to process_audio_file
@@ -73,7 +64,6 @@ def process_audio_task(self, file_path: str, content_type: str, user_id: str) ->
                 # Handle local file path
                 path_obj = Path(file_path)
                 result = loop.run_until_complete(process_audio_file(path_obj, content_type, user_id))
-                
         except Exception as loop_error:
             print(f"[AUDIO] Error processing audio file: {loop_error}")
             # Return a meaningful error without crashing
@@ -85,6 +75,22 @@ def process_audio_task(self, file_path: str, content_type: str, user_id: str) ->
                 "insight": "The system encountered an error while processing this audio",
                 "player_notes": []
             }
+        finally:
+            # Always close the loop to clean up resources
+            try:
+                # Cancel all running tasks
+                pending = asyncio.all_tasks(loop=loop)
+                for task in pending:
+                    task.cancel()
+                
+                # Run loop until tasks are cancelled
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                
+                # Close the loop
+                loop.close()
+            except Exception as close_error:
+                print(f"[CELERY] Warning: Error while closing event loop: {close_error}")
         
         # Here you could add notification logic to inform the user
         print(f"[CELERY] Completed audio processing task {task_id} for user {user_id}")
