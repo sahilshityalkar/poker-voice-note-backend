@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 from bson import ObjectId
 
-# Try to import nest_asyncio, but don't fail if it's not available
+# Apply nest_asyncio unconditionally - this is critical for handling nested event loops in Celery tasks
 try:
     import nest_asyncio
     # Apply nest_asyncio to allow nested event loops
@@ -14,7 +14,7 @@ try:
     nest_asyncio.apply()
     print("[CELERY] Successfully initialized nest_asyncio")
 except ImportError:
-    print("[CELERY] Warning: nest_asyncio not available. Using standard asyncio.")
+    print("[CELERY] WARNING: nest_asyncio not available. Event loop issues may occur!")
 
 # Debug information
 print(f"[CELERY] Text Task Python path: {sys.path}")
@@ -49,21 +49,12 @@ def process_text_task(self, text: str, user_id: str) -> Dict[str, Any]:
         # Import here to avoid circular imports
         from audio_processing.audio_api import process_text_directly
         
-        # Safely create and use an event loop without closing it
+        # Always create a new event loop for each task
+        # This prevents "attached to a different loop" errors
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
         try:
-            # First check if there's a running event loop we can use
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_closed():
-                    print("[CELERY] Existing event loop is closed, creating a new one")
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-            except RuntimeError:
-                # No event loop in this thread, create one
-                print("[CELERY] No event loop in thread, creating a new one")
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                
             # Process the text
             result = loop.run_until_complete(process_text_directly(text, user_id))
             
@@ -78,6 +69,22 @@ def process_text_task(self, text: str, user_id: str) -> Dict[str, Any]:
                 "insight": "The system encountered an error while analyzing this text",
                 "player_notes": []
             }
+        finally:
+            # Always close the loop to clean up resources
+            try:
+                # Cancel all running tasks
+                pending = asyncio.all_tasks(loop=loop)
+                for task in pending:
+                    task.cancel()
+                
+                # Run loop until tasks are cancelled
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                
+                # Close the loop
+                loop.close()
+            except Exception as close_error:
+                print(f"[CELERY] Warning: Error while closing event loop: {close_error}")
         
         print(f"[CELERY] Completed text processing task {task_id} for user {user_id}")
         
