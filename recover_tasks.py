@@ -296,6 +296,237 @@ def clear_task_by_id():
         traceback.print_exc()
         return False
 
+def force_purge_rabbitmq_queue():
+    """
+    Force purge a RabbitMQ queue using the Management API.
+    This is a more direct approach than using Celery's purge command.
+    """
+    # Get RabbitMQ connection information from environment
+    rabbitmq_url = os.getenv('RABBITMQ_URL')
+    if not rabbitmq_url:
+        print("RABBITMQ_URL environment variable not found.")
+        return False
+    
+    # Parse the RabbitMQ URL to get connection parameters
+    import re
+    match = re.match(r'amqp://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)', rabbitmq_url)
+    if not match:
+        print(f"Failed to parse RabbitMQ URL: {rabbitmq_url}")
+        return False
+    
+    username, password, host, port, vhost = match.groups()
+    vhost = vhost or '/'
+    
+    print(f"Connecting to RabbitMQ at {host}:{port} as {username}")
+    
+    # Ask for confirmation
+    confirmation = input(f"This will FORCEFULLY purge all messages in the queue. Type 'FORCE-PURGE' to confirm: ")
+    if confirmation.strip() != "FORCE-PURGE":
+        print("Operation canceled.")
+        return False
+    
+    try:
+        # Try using the RabbitMQ Management API
+        import requests
+        from requests.auth import HTTPBasicAuth
+        
+        # Get the queue name from Celery config
+        queue_name = app.conf.task_default_queue
+        
+        # Construct the Management API URL for purging the queue
+        api_port = 15672  # Default management port
+        
+        # URL to purge the queue
+        api_url = f"http://{host}:{api_port}/api/queues/{vhost}/{queue_name}/contents"
+        
+        # Make the DELETE request to purge the queue
+        response = requests.delete(
+            api_url,
+            auth=HTTPBasicAuth(username, password)
+        )
+        
+        if response.status_code == 204:  # 204 No Content is the success response
+            print(f"Queue '{queue_name}' successfully purged")
+            return True
+        else:
+            print(f"Failed to purge queue: {response.status_code} - {response.text}")
+            
+            # Try fallback method with direct connection
+            print("Trying fallback method...")
+            from kombu import Connection
+            
+            with Connection(rabbitmq_url) as conn:
+                channel = conn.channel()
+                result = channel.queue_purge(queue_name)
+                print(f"Purged {result} messages from queue '{queue_name}' using direct connection")
+                return True
+                
+            return False
+            
+    except ImportError:
+        print("Required packages not installed. Try: pip install requests")
+        return False
+    except Exception as e:
+        print(f"Error forcefully purging queue: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def force_reject_message():
+    """
+    Forcefully reject a specific message from the RabbitMQ queue using the Management API.
+    This is useful for removing stuck messages that have been delivered but not acknowledged.
+    """
+    # Get RabbitMQ connection information from environment
+    rabbitmq_url = os.getenv('RABBITMQ_URL')
+    if not rabbitmq_url:
+        print("RABBITMQ_URL environment variable not found.")
+        return False
+    
+    # Parse the RabbitMQ URL to get connection parameters
+    import re
+    match = re.match(r'amqp://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)', rabbitmq_url)
+    if not match:
+        print(f"Failed to parse RabbitMQ URL: {rabbitmq_url}")
+        return False
+    
+    username, password, host, port, vhost = match.groups()
+    vhost = vhost or '/'
+    
+    print(f"Connecting to RabbitMQ at {host}:{port} as {username}")
+    
+    try:
+        # Try using the RabbitMQ Management API
+        import requests
+        from requests.auth import HTTPBasicAuth
+        import json
+        
+        # Get the queue name from Celery config
+        queue_name = app.conf.task_default_queue
+        
+        # Construct the Management API URL to get messages
+        api_port = 15672  # Default management port
+        api_url = f"http://{host}:{api_port}/api/queues/{vhost}/{queue_name}/get"
+        
+        # Ask how many messages to check (getting all messages at once can be resource-intensive)
+        try:
+            count = int(input("How many messages to check (recommend 10-50): ") or "20")
+        except ValueError:
+            count = 20
+        
+        # Prepare the request to get messages
+        data = {
+            "count": count,
+            "requeue": True,
+            "encoding": "auto",
+            "truncate": 50000
+        }
+        
+        print(f"Fetching up to {count} messages from queue '{queue_name}'...")
+        
+        # Make the POST request to get messages
+        response = requests.post(
+            api_url,
+            auth=HTTPBasicAuth(username, password),
+            json=data,
+            headers={"content-type": "application/json"}
+        )
+        
+        if response.status_code != 200:
+            print(f"Failed to fetch messages: {response.status_code} - {response.text}")
+            return False
+            
+        messages = response.json()
+        if not messages:
+            print("No messages found in the queue.")
+            return False
+            
+        print(f"Found {len(messages)} messages in the queue.")
+        
+        # Display summary of messages
+        for idx, msg in enumerate(messages):
+            properties = msg.get("properties", {})
+            headers = properties.get("headers", {})
+            
+            # Try to extract task id from the message
+            task_id = None
+            task_name = None
+            
+            # Extract from properties headers
+            task_id = headers.get("id", None)
+            if not task_id:
+                # Try to extract from payload if it's a Celery task
+                try:
+                    payload = json.loads(msg.get("payload"))
+                    task_id = payload.get("id", None)
+                    task_name = payload.get("task", None)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            
+            delivery_tag = msg.get("delivery_tag")
+                
+            print(f"{idx+1}. Delivery Tag: {delivery_tag}")
+            print(f"   Task ID: {task_id or 'Unknown'}")
+            print(f"   Task: {task_name or 'Unknown'}")
+            
+            # Display a small portion of the payload
+            try:
+                payload_str = msg.get("payload", "")
+                if len(payload_str) > 100:
+                    payload_str = payload_str[:100] + "..."
+                print(f"   Payload: {payload_str}")
+            except:
+                print("   Payload: [Error displaying payload]")
+            print("")
+        
+        # Ask which message to reject
+        try:
+            idx = int(input("Enter the number of the message to reject (0 to cancel): "))
+            if idx == 0:
+                print("Operation canceled.")
+                return False
+                
+            if idx < 1 or idx > len(messages):
+                print(f"Invalid selection. Must be between 1 and {len(messages)}.")
+                return False
+                
+            selected_msg = messages[idx-1]
+            delivery_tag = selected_msg.get("delivery_tag")
+            
+            # Get confirmation
+            confirm = input(f"Are you sure you want to REJECT message with delivery tag {delivery_tag}? (y/n): ")
+            if confirm.lower() != 'y':
+                print("Operation canceled.")
+                return False
+                
+            # Use a direct connection to reject the message
+            from kombu import Connection
+            
+            with Connection(rabbitmq_url) as conn:
+                channel = conn.channel()
+                
+                # Reject the message without requeuing
+                channel.basic_reject(delivery_tag, requeue=False)
+                print(f"Successfully rejected message with delivery tag {delivery_tag}")
+                
+                # Close the connection
+                channel.close()
+                
+            return True
+                
+        except ValueError:
+            print("Invalid input. Expected a number.")
+            return False
+            
+    except ImportError:
+        print("Required packages not installed. Try: pip install requests")
+        return False
+    except Exception as e:
+        print(f"Error rejecting message: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def main_menu():
     """Display the main menu and handle user input"""
     while True:
@@ -307,9 +538,11 @@ def main_menu():
         print("5. Retry a specific failed task")
         print("6. Clear stuck ready tasks")
         print("7. Clear a specific task by ID")
+        print("8. Force purge RabbitMQ queue")
+        print("9. Force reject specific message")
         print("0. Exit")
         
-        choice = input("\nEnter choice (0-7): ")
+        choice = input("\nEnter choice (0-9): ")
         
         if choice == "1":
             get_task_info()
@@ -325,6 +558,10 @@ def main_menu():
             clear_stuck_ready_tasks()
         elif choice == "7":
             clear_task_by_id()
+        elif choice == "8":
+            force_purge_rabbitmq_queue()
+        elif choice == "9":
+            force_reject_message()
         elif choice == "0":
             print("Exiting...")
             break

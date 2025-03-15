@@ -36,16 +36,29 @@ def process_text_task(self, text: str, user_id: str) -> Dict[str, Any]:
     Returns:
         Results of the text processing pipeline
     """
-    # Import internal connection for message explicit acknowledgment
-    from celery.worker.request import Request
+    # Import kombu for direct RabbitMQ communication if needed
+    from kombu import Connection
     
     # Support for manual acknowledgment
     message_acknowledged = False
+    delivery_info = None
+    delivery_tag = None
     
     try:
         task_id = self.request.id
         retry_count = self.request.retries
         print(f"[CELERY] Starting text processing task {task_id} for user {user_id} (attempt {retry_count+1}/6)")
+        
+        # Debug: Check if we have message delivery info
+        if hasattr(self.request, 'message') and self.request.message:
+            delivery_info = getattr(self.request.message, 'delivery_info', None)
+            delivery_tag = delivery_info.get('delivery_tag') if delivery_info else None
+            print(f"[CELERY DEBUG] Task {task_id} has delivery_tag: {delivery_tag}")
+            connection_id = getattr(self.request.message, 'channel', None)
+            if connection_id:
+                print(f"[CELERY DEBUG] Task connected via channel: {connection_id}")
+        else:
+            print(f"[CELERY DEBUG] Task {task_id} has no message attribute")
         
         # Update task status
         self.update_state(
@@ -110,21 +123,86 @@ def process_text_task(self, text: str, user_id: str) -> Dict[str, Any]:
         
         print(f"[CELERY] Completed text processing task {task_id} for user {user_id}")
         
-        # Explicitly acknowledge the task to ensure it's removed from the queue
-        # This is a workaround for tasks that might not be properly acknowledged
-        try:
-            # Only attempt this in workers (not in eager mode)
-            if not self.request.is_eager:
-                # Get the current task's message from the request
-                # This is an internal Celery API that might change in future versions
-                current_message = self.request.message
-                current_message.ack()
-                print(f"[CELERY] Explicitly acknowledged task {task_id}")
-                message_acknowledged = True
-        except Exception as ack_error:
-            print(f"[CELERY] Note: Could not explicitly acknowledge task: {ack_error}")
-            # This is not a critical error, as Celery should still acknowledge normally
-            pass
+        # Attempt direct acknowledgment through multiple methods
+        if not self.request.is_eager:
+            try:
+                # METHOD 1: Direct message acknowledgment if available
+                if hasattr(self.request, 'message') and self.request.message is not None:
+                    print(f"[CELERY] Attempting Method 1: Direct message acknowledgment for task {task_id}")
+                    
+                    # Check what type of message object we have (debugging info)
+                    msg_type = type(self.request.message).__name__
+                    print(f"[CELERY DEBUG] Message object type: {msg_type}")
+                    
+                    # Try to find acknowledgment method
+                    if hasattr(self.request.message, 'ack'):
+                        print(f"[CELERY DEBUG] Found message.ack() method")
+                        self.request.message.ack()
+                        message_acknowledged = True
+                        print(f"[CELERY] Successfully acknowledged task {task_id} via message.ack()")
+                    elif hasattr(self.request.message, 'acknowledge'):
+                        print(f"[CELERY DEBUG] Found message.acknowledge() method")
+                        self.request.message.acknowledge()
+                        message_acknowledged = True
+                        print(f"[CELERY] Successfully acknowledged task {task_id} via message.acknowledge()")
+                    else:
+                        print(f"[CELERY DEBUG] Message object has no ack/acknowledge method")
+            except Exception as direct_ack_error:
+                print(f"[CELERY] Method 1 failed: {direct_ack_error}")
+            
+            # METHOD 2: Try to acknowledge via task request
+            if not message_acknowledged:
+                try:
+                    print(f"[CELERY] Attempting Method 2: Task request acknowledgment for task {task_id}")
+                    if hasattr(self.request, 'acknowledge'):
+                        self.request.acknowledge()
+                        message_acknowledged = True
+                        print(f"[CELERY] Successfully acknowledged task {task_id} via request.acknowledge()")
+                except Exception as req_ack_error:
+                    print(f"[CELERY] Method 2 failed: {req_ack_error}")
+            
+            # METHOD 3: Use connection via app - most reliable way
+            if not message_acknowledged and delivery_tag:
+                try:
+                    print(f"[CELERY] Attempting Method 3: Direct channel acknowledgment for task {task_id}")
+                    # Get connection from Celery app
+                    conn = app.connection()
+                    conn.connect()
+                    channel = conn.channel()
+                    
+                    # Acknowledge the message using its delivery tag
+                    channel.basic_ack(delivery_tag=delivery_tag)
+                    
+                    # Close the connection
+                    channel.close()
+                    conn.close()
+                    
+                    message_acknowledged = True
+                    print(f"[CELERY] Successfully acknowledged task {task_id} via channel (tag: {delivery_tag})")
+                except Exception as channel_ack_error:
+                    print(f"[CELERY] Method 3 failed: {channel_ack_error}")
+            
+            # METHOD 4: Last resort - acknowledge all pending messages
+            if not message_acknowledged:
+                try:
+                    print(f"[CELERY] Attempting Method 4: Acknowledge all pending messages for task {task_id}")
+                    # Get connection from Celery app
+                    conn = app.connection()
+                    conn.connect()
+                    channel = conn.channel()
+                    
+                    # Acknowledge all pending messages up to this point
+                    # This is a last resort and will acknowledge ALL messages, not just this one
+                    channel.basic_ack(delivery_tag=0, multiple=True)
+                    
+                    # Close the connection
+                    channel.close()
+                    conn.close()
+                    
+                    print(f"[CELERY] WARNING: Acknowledged ALL pending tasks via channel as last resort")
+                    message_acknowledged = True
+                except Exception as all_ack_error:
+                    print(f"[CELERY] Method 4 failed: {all_ack_error}")
         
         # Return the full result
         return {
@@ -134,7 +212,8 @@ def process_text_task(self, text: str, user_id: str) -> Dict[str, Any]:
             "text_length": len(text),
             "completion_time": datetime.now().isoformat(),
             "result": result,
-            "message_acknowledged": message_acknowledged
+            "message_acknowledged": message_acknowledged,
+            "delivery_tag": delivery_tag
         }
         
     except Exception as e:
