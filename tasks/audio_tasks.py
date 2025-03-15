@@ -22,7 +22,12 @@ except ImportError:
 print(f"[CELERY] Task Python path: {sys.path}")
 
 
-@app.task(name="tasks.process_audio", bind=True)
+@app.task(name="tasks.process_audio", bind=True, 
+          autoretry_for=(Exception,),  # Auto retry for all exceptions
+          retry_kwargs={'max_retries': 5},  # Max 5 retries
+          retry_backoff=True,  # Exponential backoff
+          retry_backoff_max=300,  # Max 5 minutes backoff
+          acks_late=True)  # Only acknowledge task after it completes successfully
 def process_audio_task(self, file_path: str, content_type: str, user_id: str) -> Dict[str, Any]:
     """
     Celery task to process an audio file in the background.
@@ -37,7 +42,8 @@ def process_audio_task(self, file_path: str, content_type: str, user_id: str) ->
     """
     try:
         task_id = self.request.id
-        print(f"[CELERY] Starting audio processing task {task_id} for user {user_id}")
+        retry_count = self.request.retries
+        print(f"[CELERY] Starting audio processing task {task_id} for user {user_id} (attempt {retry_count+1}/6)")
         
         # Update task status (could be stored in a database or sent to a websocket)
         self.update_state(
@@ -45,7 +51,8 @@ def process_audio_task(self, file_path: str, content_type: str, user_id: str) ->
             meta={
                 "file_path": file_path,
                 "user_id": user_id,
-                "start_time": datetime.now().isoformat()
+                "start_time": datetime.now().isoformat(),
+                "attempt": retry_count + 1
             }
         )
         
@@ -75,8 +82,11 @@ def process_audio_task(self, file_path: str, content_type: str, user_id: str) ->
                 "insight": "The system encountered an error while processing this audio",
                 "player_notes": []
             }
+            # Raise the exception to trigger a retry if retries remain
+            if retry_count < 5:
+                raise loop_error
         finally:
-            # Always close the loop to clean up resources
+            # Clean up resources but DON'T close the loop
             try:
                 # Cancel all running tasks
                 pending = asyncio.all_tasks(loop=loop)
@@ -87,10 +97,10 @@ def process_audio_task(self, file_path: str, content_type: str, user_id: str) ->
                 if pending:
                     loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
                 
-                # Close the loop
-                loop.close()
+                # DO NOT close the loop - this causes "Event loop is closed" errors on subsequent runs
+                # loop.close()  <- Removing this line
             except Exception as close_error:
-                print(f"[CELERY] Warning: Error while closing event loop: {close_error}")
+                print(f"[CELERY] Warning: Error while cleaning up event loop tasks: {close_error}")
         
         # Here you could add notification logic to inform the user
         print(f"[CELERY] Completed audio processing task {task_id} for user {user_id}")
@@ -114,8 +124,10 @@ def process_audio_task(self, file_path: str, content_type: str, user_id: str) ->
                 "file_path": file_path,
                 "user_id": user_id,
                 "error": str(e),
-                "time": datetime.now().isoformat()
+                "time": datetime.now().isoformat(),
+                "attempt": self.request.retries + 1,
+                "max_attempts": 6
             }
         )
-        # Re-raise the exception to mark the task as failed
+        # Re-raise the exception to mark the task as failed and trigger a retry
         raise 

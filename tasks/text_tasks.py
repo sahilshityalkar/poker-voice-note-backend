@@ -20,7 +20,12 @@ except ImportError:
 print(f"[CELERY] Text Task Python path: {sys.path}")
 
 
-@app.task(name="tasks.process_text", bind=True , queue='celery')
+@app.task(name="tasks.process_text", bind=True, queue='celery', 
+          autoretry_for=(Exception,),  # Auto retry for all exceptions
+          retry_kwargs={'max_retries': 5},  # Max 5 retries
+          retry_backoff=True,  # Exponential backoff
+          retry_backoff_max=300,  # Max 5 minutes backoff
+          acks_late=True)  # Only acknowledge task after it completes successfully
 def process_text_task(self, text: str, user_id: str) -> Dict[str, Any]:
     """
     Celery task to process text input in the background.
@@ -34,7 +39,8 @@ def process_text_task(self, text: str, user_id: str) -> Dict[str, Any]:
     """
     try:
         task_id = self.request.id
-        print(f"[CELERY] Starting text processing task {task_id} for user {user_id}")
+        retry_count = self.request.retries
+        print(f"[CELERY] Starting text processing task {task_id} for user {user_id} (attempt {retry_count+1}/6)")
         
         # Update task status
         self.update_state(
@@ -42,7 +48,8 @@ def process_text_task(self, text: str, user_id: str) -> Dict[str, Any]:
             meta={
                 "text_length": len(text),
                 "user_id": user_id,
-                "start_time": datetime.now().isoformat()
+                "start_time": datetime.now().isoformat(),
+                "attempt": retry_count + 1
             }
         )
         
@@ -69,8 +76,11 @@ def process_text_task(self, text: str, user_id: str) -> Dict[str, Any]:
                 "insight": "The system encountered an error while analyzing this text",
                 "player_notes": []
             }
+            # Raise the exception to trigger a retry if retries remain
+            if retry_count < 5:
+                raise loop_error
         finally:
-            # Always close the loop to clean up resources
+            # Clean up resources but DON'T close the loop
             try:
                 # Cancel all running tasks
                 pending = asyncio.all_tasks(loop=loop)
@@ -81,10 +91,10 @@ def process_text_task(self, text: str, user_id: str) -> Dict[str, Any]:
                 if pending:
                     loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
                 
-                # Close the loop
-                loop.close()
+                # DO NOT close the loop - this causes "Event loop is closed" errors on subsequent runs
+                # loop.close()  <- Removing this line
             except Exception as close_error:
-                print(f"[CELERY] Warning: Error while closing event loop: {close_error}")
+                print(f"[CELERY] Warning: Error while cleaning up event loop tasks: {close_error}")
         
         print(f"[CELERY] Completed text processing task {task_id} for user {user_id}")
         
@@ -107,8 +117,10 @@ def process_text_task(self, text: str, user_id: str) -> Dict[str, Any]:
                 "text_length": len(text) if text else 0,
                 "user_id": user_id,
                 "error": str(e),
-                "time": datetime.now().isoformat()
+                "time": datetime.now().isoformat(),
+                "attempt": self.request.retries + 1,
+                "max_attempts": 6
             }
         )
-        # Re-raise the exception to mark the task as failed
+        # Re-raise the exception to mark the task as failed and trigger a retry if retries remain
         raise 

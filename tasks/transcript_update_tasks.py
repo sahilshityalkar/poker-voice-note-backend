@@ -24,18 +24,25 @@ except ImportError:
 except Exception as nest_error:
     print(f"[WARNING] Error setting up nest_asyncio: {nest_error}")
 
-@app.task(bind=True, name="update_transcript_task")
+@app.task(bind=True, name="update_transcript_task",
+          autoretry_for=(Exception,),  # Auto retry for all exceptions
+          retry_kwargs={'max_retries': 5},  # Max 5 retries
+          retry_backoff=True,  # Exponential backoff
+          retry_backoff_max=300,  # Max 5 minutes backoff
+          acks_late=True)  # Only acknowledge task after it completes successfully
 def update_transcript_task(self, note_id: str, text: str, user_id: str) -> Dict[str, Any]:
     """Celery task to update a note's transcript and reprocess all data"""
     
-    print(f"[TASK] Starting transcript update task for note: {note_id}")
+    retry_count = self.request.retries
+    print(f"[TASK] Starting transcript update task for note: {note_id} (attempt {retry_count+1}/6)")
     
     # Update task state to STARTED
     self.update_state(state='STARTED', meta={
         'message': f'Processing transcript update for note {note_id}',
         'note_id': note_id,
         'text_length': len(text),
-        'progress': 0
+        'progress': 0,
+        'attempt': retry_count + 1
     })
     
     try:
@@ -50,7 +57,8 @@ def update_transcript_task(self, note_id: str, text: str, user_id: str) -> Dict[
                 'transcript': text[:100] + "..." if len(text) > 100 else text,
                 'summary': result.get('summary', '')[:100] + "..." if result.get('summary', '') and len(result.get('summary', '')) > 100 else result.get('summary', ''),
                 'players_count': len(result.get('player_notes', [])),
-                'progress': 100
+                'progress': 100,
+                'attempt': retry_count + 1
             })
             print(f"[TASK] Transcript update completed for note: {note_id}")
             return {
@@ -60,30 +68,57 @@ def update_transcript_task(self, note_id: str, text: str, user_id: str) -> Dict[
             }
         else:
             error_message = result.get('message', 'Unknown error during transcript update')
+            # If we still have retries, allow the task to retry
+            if retry_count < 5:
+                self.update_state(state='RETRY', meta={
+                    'message': f'{error_message} (will retry)',
+                    'note_id': note_id,
+                    'error': result.get('error', 'Unknown error'),
+                    'attempt': retry_count + 1,
+                    'max_attempts': 6
+                })
+                print(f"[TASK] Transcript update failed for note {note_id}: {error_message} - Will retry (attempt {retry_count+1}/6)")
+                # Raise exception to trigger retry
+                raise Exception(error_message)
+            else:
+                # No more retries, mark as failed
+                self.update_state(state='FAILURE', meta={
+                    'message': error_message,
+                    'note_id': note_id,
+                    'error': result.get('error', 'Unknown error'),
+                    'attempt': retry_count + 1,
+                    'max_attempts': 6
+                })
+                print(f"[TASK] Transcript update failed for note {note_id}: {error_message} - No more retries")
+                return {
+                    'success': False,
+                    'message': error_message,
+                    'error': result.get('error', 'Unknown error')
+                }
+    except Exception as e:
+        error_message = f"Error in transcript update task: {str(e)}"
+        # If we still have retries, state is RETRY
+        if retry_count < 5:
+            self.update_state(state='RETRY', meta={
+                'message': f"{error_message} (will retry)",
+                'note_id': note_id,
+                'attempt': retry_count + 1,
+                'max_attempts': 6
+            })
+            print(f"[TASK] Exception in transcript update task for note {note_id}: {e} - Will retry (attempt {retry_count+1}/6)")
+        else:
+            # No more retries, state is FAILURE
             self.update_state(state='FAILURE', meta={
                 'message': error_message,
                 'note_id': note_id,
-                'error': result.get('error', 'Unknown error')
+                'attempt': retry_count + 1,
+                'max_attempts': 6
             })
-            print(f"[TASK] Transcript update failed for note {note_id}: {error_message}")
-            return {
-                'success': False,
-                'message': error_message,
-                'error': result.get('error', 'Unknown error')
-            }
-    except Exception as e:
-        error_message = f"Error in transcript update task: {str(e)}"
-        self.update_state(state='FAILURE', meta={
-            'message': error_message,
-            'note_id': note_id
-        })
-        print(f"[TASK] Exception in transcript update task for note {note_id}: {e}")
+            print(f"[TASK] Exception in transcript update task for note {note_id}: {e} - No more retries")
+        
         traceback.print_exc()
-        return {
-            'success': False,
-            'message': error_message,
-            'error': str(e)
-        }
+        # Raise to trigger retry mechanism
+        raise
 
 def execute_in_isolated_process(note_id: str, text: str, user_id: str) -> Dict[str, Any]:
     """Execute the update in a completely isolated process"""
@@ -225,15 +260,15 @@ def execute_in_isolated_process(note_id: str, text: str, user_id: str) -> Dict[s
         return result
         
     finally:
-        # Always clean up the event loop
+        # Clean up resources but DON'T close the loop
         try:
             # Cancel any pending tasks
             pending_tasks = asyncio.all_tasks(loop)
             if pending_tasks:
                 loop.run_until_complete(asyncio.gather(*pending_tasks, return_exceptions=True))
             
-            # Close the loop
-            loop.close()
-            print(f"[TASK] Closed isolated event loop")
+            # DO NOT close the loop - this causes "Event loop is closed" errors on subsequent runs
+            # loop.close()  <- Removing this line
+            print(f"[TASK] Cleaned up isolated event loop tasks")
         except Exception as e:
-            print(f"[TASK] Error cleaning up event loop: {e}") 
+            print(f"[TASK] Error cleaning up event loop tasks: {e}") 
