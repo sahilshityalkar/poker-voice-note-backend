@@ -29,6 +29,9 @@ app.conf.update(
     broker_connection_retry_on_startup=True,
     task_track_started=True,  # Track when tasks are started
     task_time_limit=3600,     # 1 hour time limit per task
+    task_acks_late=False,  # Acknowledge tasks before processing
+    broker_transport_options={'confirm_publish': True},  # Ensure publisher confirms
+    worker_prefetch_multiplier=1,  # Lower prefetch count
 )
 
 # Print debug information
