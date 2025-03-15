@@ -34,59 +34,23 @@ app.conf.update(
     broker_connection_retry_on_startup=True,
     task_track_started=True,      # Track when tasks are started
     task_time_limit=3600,         # 1 hour time limit per task
-    task_acks_late=False,         # Changed to False to allow explicit acknowledgment in the task
-    broker_transport_options={
-        'confirm_publish': True,      # Ensure publisher confirms
-        'visibility_timeout': 1209600,  # 14 days - how long before a task is redelivered if not acknowledged
-        # RabbitMQ specific settings for durability
-        'queue_ha_policy': 'all',    # High availability queue policy
-        'delivery_mode': 2,          # Make messages persistent (saved to disk)
-        'max_retries': 10,           # Max retries for broker operations
-        'interval_start': 0,         # Start retry immediately 
-        'interval_step': 1,          # Increase retry interval by 1 second each attempt
-        'interval_max': 30,          # Maximum retry interval of 30 seconds
-    },
-    # Acknowledgment settings to prevent phantom tasks
-    broker_connection_max_retries=15,  # Maximum connection retries
-    broker_connection_timeout=30,    # Connection timeout
-    broker_pool_limit=10,            # Connection pool size
-    broker_heartbeat=10,             # Heartbeat interval (seconds)
-    task_send_sent_event=True,       # Send task-sent events to monitor task flow
-    worker_prefetch_multiplier=1,    # Lower prefetch count to process one message at a time
+    task_acks_late=False,         # Acknowledge tasks immediately after receiving them
     
-    # Task acknowledgment settings
-    worker_cancel_long_running_tasks_on_connection_loss=True,  # Cancel tasks if connection lost
-    task_reject_on_worker_lost=True,  # Reject task if worker dies
-    task_ack_on_failure=True,         # Acknowledge tasks even if they fail
-    task_ack_late=False,              # Don't ack late, use explicit acks
+    # Simplified broker options
+    broker_transport_options={
+        'visibility_timeout': 3600,  # 1 hour - how long before a task is redelivered if not acknowledged
+        'delivery_mode': 2,          # Make messages persistent (saved to disk)
+    },
+    
+    # Basic connection settings
+    broker_connection_max_retries=5,   # Maximum connection retries
+    broker_connection_timeout=30,      # Connection timeout
     
     # Worker settings
-    worker_disable_rate_limits=True,  # Disable rate limits
-    worker_max_tasks_per_child=100,   # Restart worker after 100 tasks
-    worker_concurrency=2,             # Use 2 worker processes
-    worker_send_task_events=True,     # Send task events
+    worker_prefetch_multiplier=1,      # Process one message at a time
+    worker_cancel_long_running_tasks_on_connection_loss=True,  # Cancel tasks if connection lost
     
-    # Retry settings for failed tasks
-    task_default_retry_delay=30,      # 30 seconds delay before first retry
-    task_max_retries=5,               # Maximum of 5 retries
-    task_retry_jitter=True,           # Add jitter to avoid thundering herd
-    
-    # Ensure tasks aren't lost if they fail
-    task_always_eager=False,          # Don't run tasks synchronously
-    task_store_errors_even_if_ignored=True,  # Store errors even when ignored
-    task_ignore_result=False,         # Don't ignore results
-    result_expires=86400,             # Results expire after 1 day
-    
-    # Add retry settings for more resilience
-    task_publish_retry=True,
-    task_publish_retry_policy={
-        'max_retries': 5,
-        'interval_start': 0,
-        'interval_step': 0.2,
-        'interval_max': 0.5,
-    },
-    
-    # Explicitly define queue settings to prevent random queue creation
+    # Queue settings
     task_queues=(default_queue,),
     task_default_queue='celery',
     task_default_exchange='celery',
