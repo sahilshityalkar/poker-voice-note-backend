@@ -20,7 +20,7 @@ except ImportError:
 print(f"[CELERY] Text Task Python path: {sys.path}")
 
 
-@app.task(name="tasks.process_text", bind=True)
+@app.task(name="tasks.process_text", bind=True , queue='celery')
 def process_text_task(self, text: str, user_id: str) -> Dict[str, Any]:
     """
     Celery task to process text input in the background.
