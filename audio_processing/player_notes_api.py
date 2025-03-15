@@ -46,11 +46,14 @@ players_notes_collection = db.players_notes
 __all__ = ['players_collection', 'notes_collection', 'players_notes_collection', 'db']
 
 # Function to get a fresh database connection with the current event loop
-def get_fresh_connection():
-    """Get a fresh database connection with the current event loop"""
+def get_fresh_connection(loop=None):
+    """Get a fresh database connection with the current event loop or a provided one"""
     try:
-        # Get a fresh connection
-        fresh_client = get_database_connection()
+        # Import the function to avoid circular imports
+        from database import get_database_connection
+        
+        # Get a fresh connection with the specified loop or current one
+        fresh_client = get_database_connection(loop)
         fresh_db = fresh_client.pokernotes
         
         # Return updated collections
@@ -442,7 +445,7 @@ def parse_gpt_player_response(raw_response: str) -> Dict:
         # Return empty result on failure
         return {"players": [], "missed_players": []}
 
-async def analyze_players_in_note(note_id: str, user_id: str, retry_count: int = 3, is_update: bool = False) -> Dict[str, Any]:
+async def analyze_players_in_note(note_id: str, user_id: str, retry_count: int = 3, is_update: bool = False, loop=None) -> Dict[str, Any]:
     """
     Analyze players in a note using GPT-4o and store the results
     
@@ -452,14 +455,15 @@ async def analyze_players_in_note(note_id: str, user_id: str, retry_count: int =
         retry_count: Number of retries for GPT calls
         is_update: Whether this is being called during a transcript update
                   (if True, matching to existing players is skipped)
+        loop: Optional event loop to use (to prevent using different loops)
     """
     try:
         # Log start of player analysis
         print(f"[PLAYERS] Starting player analysis for note {note_id} (is_update={is_update})")
         
-        # Get fresh database connections for this operation
+        # Get fresh database connections for this operation - use provided loop if available
         print(f"[PLAYERS] Getting fresh database connections for note {note_id}")
-        conn = get_fresh_connection()
+        conn = get_fresh_connection(loop)
         p_collection = conn['players']
         pn_collection = conn['players_notes']
         n_collection = conn['notes']

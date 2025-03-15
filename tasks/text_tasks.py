@@ -63,8 +63,16 @@ def process_text_task(self, text: str, user_id: str) -> Dict[str, Any]:
         
         try:
             # Process the text
-            result = loop.run_until_complete(process_text_directly(text, user_id))
+            result = loop.run_until_complete(process_text_directly(text, user_id, loop=loop))
             
+            # Check if result indicates error
+            if result.get("success") is False:
+                error = result.get("error", "Unknown error in text processing")
+                print(f"[TEXT] Text processing returned error: {error}")
+                # Force task failure to trigger retry
+                if retry_count < 5:
+                    raise Exception(f"Text processing failed: {error}")
+                    
         except Exception as loop_error:
             print(f"[TEXT] Error processing text directly: {loop_error}")
             # Return a meaningful error without crashing
@@ -76,9 +84,8 @@ def process_text_task(self, text: str, user_id: str) -> Dict[str, Any]:
                 "insight": "The system encountered an error while analyzing this text",
                 "player_notes": []
             }
-            # Raise the exception to trigger a retry if retries remain
-            if retry_count < 5:
-                raise loop_error
+            # Always raise the exception to trigger a retry
+            raise loop_error
         finally:
             # Clean up resources but DON'T close the loop
             try:

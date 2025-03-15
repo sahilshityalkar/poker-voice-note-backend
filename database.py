@@ -5,8 +5,16 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-def get_database_connection():
-    """Get a database connection with the current event loop"""
+def get_database_connection(provided_loop=None):
+    """
+    Get a database connection with either a provided event loop or the current one
+    
+    Args:
+        provided_loop: Optional event loop to use instead of creating a new one
+    
+    Returns:
+        AsyncIOMotorClient connected to the current or provided event loop
+    """
     # Import here to avoid circular imports
     import motor.motor_asyncio
     
@@ -31,13 +39,15 @@ def get_database_connection():
         else:
             print(f"[DB] Using MongoDB connection from environment variables")
             
-        # Always create a fresh client connected to the current event loop
+        # Use the provided loop or get the current one
+        loop_to_use = provided_loop or asyncio.get_event_loop()
+        
+        # Always create a fresh client connected to the specified event loop
         # This ensures we don't reuse connections from closed loops
-        current_loop = asyncio.get_event_loop()
-        client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URI, io_loop=current_loop)
+        client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URI, io_loop=loop_to_use)
         
         # Log the connection
-        print(f"[DB] Created new MongoDB connection with event loop {id(current_loop)}")
+        print(f"[DB] Created new MongoDB connection with event loop {id(loop_to_use)}")
         
         return client
     except Exception as e:

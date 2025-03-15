@@ -507,7 +507,7 @@ async def transcribe_audio_file(audio_url: str, user_id: str) -> Dict[str, Any]:
         print(f"[TRANSCRIBE] Error in transcribe_audio_file: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-async def process_text_directly(text: str, user_id: str) -> Dict[str, Any]:
+async def process_text_directly(text: str, user_id: str, loop=None) -> Dict[str, Any]:
     """Process text directly without audio transcription - used by Celery tasks"""
     try:
         if not text or not text.strip():
@@ -562,7 +562,16 @@ async def process_text_directly(text: str, user_id: str) -> Dict[str, Any]:
         # Step 3: Start player analysis in parallel with transcript analysis
         # Since player_analysis needs the note_id which we now have
         from audio_processing.player_notes_api import analyze_players_in_note
-        player_analysis_task = analyze_players_in_note(str(note_id), user_id, is_update=True)
+        
+        # Create an isolated player analysis task - passing the current loop if provided
+        if loop:
+            # Explicitly set the loop for the analyze_players_in_note function
+            player_analysis_task = asyncio.ensure_future(
+                analyze_players_in_note(str(note_id), user_id, is_update=True), 
+                loop=loop
+            )
+        else:
+            player_analysis_task = analyze_players_in_note(str(note_id), user_id, is_update=True)
         
         # Wait for both tasks to complete in parallel
         processed_data, player_analysis_result = await asyncio.gather(

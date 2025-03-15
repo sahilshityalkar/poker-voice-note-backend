@@ -34,7 +34,7 @@ app.conf.update(
     broker_connection_retry_on_startup=True,
     task_track_started=True,  # Track when tasks are started
     task_time_limit=3600,     # 1 hour time limit per task
-    task_acks_late=True,      # Acknowledge tasks only after processing completes
+    task_acks_late=True,      # Acknowledge tasks only after processing completes successfully
     broker_transport_options={
         'confirm_publish': True,  # Ensure publisher confirms
         'visibility_timeout': 3600,  # 1 hour - how long before a task is redelivered if not acknowledged
@@ -44,6 +44,17 @@ app.conf.update(
     # Task acknowledgment settings
     worker_cancel_long_running_tasks_on_connection_loss=True,  # Cancel tasks if connection lost
     task_reject_on_worker_lost=True,  # Reject task if worker dies
+    
+    # Retry settings for failed tasks
+    task_default_retry_delay=30,  # 30 seconds delay before first retry
+    task_max_retries=5,          # Maximum of 5 retries
+    task_retry_jitter=True,      # Add jitter to avoid thundering herd
+    
+    # Ensure tasks aren't lost if they fail
+    task_always_eager=False,      # Don't run tasks synchronously
+    task_store_errors_even_if_ignored=True,  # Store errors even when ignored
+    task_ignore_result=False,     # Don't ignore results
+    result_expires=86400,         # Results expire after 1 day
     
     # Add retry settings for more resilience
     task_publish_retry=True,
