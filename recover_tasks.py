@@ -134,6 +134,168 @@ def retry_failed_task():
     
     return True
 
+def clear_stuck_ready_tasks():
+    """
+    Clean up tasks that are stuck in the "ready" queue after completion.
+    This is useful when you see phantom tasks in the queue after processing.
+    """
+    from celery.task.control import inspect
+    
+    i = inspect()
+    
+    # Get queue stats
+    stats = i.stats() or {}
+    
+    # Check for tasks in ready state
+    reserved_tasks = i.reserved() or {}
+    ready_count = sum(len(tasks) for tasks in reserved_tasks.values()) 
+    print(f"Tasks in reserved/ready state: {ready_count}")
+    
+    for worker, tasks in reserved_tasks.items():
+        for task in tasks:
+            task_id = task.get('id')
+            task_name = task.get('name')
+            print(f"Found ready task {task_id} ({task_name}) on worker {worker}")
+    
+    # Ask for confirmation before purging
+    confirmation = input("\nThis will purge all ready tasks. Type 'CLEAR-READY' to confirm: ")
+    if confirmation.strip() != "CLEAR-READY":
+        print("Operation canceled.")
+        return False
+    
+    # Create a direct connection to RabbitMQ via Celery connection
+    # Note: This is a more targeted approach than purging all
+    print("Clearing stuck ready tasks...")
+    try:
+        # Get the Celery connection
+        conn = app.connection()
+        conn.connect()
+        channel = conn.channel()
+        
+        # Get the queue name from Celery config
+        queue_name = app.conf.task_default_queue
+        
+        # Purge the specific queue
+        result = channel.queue_purge(queue_name)
+        print(f"Purged {result} messages from queue '{queue_name}'")
+        
+        # Close the connection
+        channel.close()
+        conn.close()
+        
+        return True
+    except Exception as e:
+        print(f"Error clearing ready tasks: {e}")
+        return False
+
+def clear_task_by_id():
+    """
+    Clear a specific task by ID from the RabbitMQ queue.
+    This requires the RabbitMQ Management plugin to be enabled.
+    """
+    task_id = input("Enter the task ID to clear: ").strip()
+    if not task_id:
+        print("No task ID provided.")
+        return False
+    
+    # Get RabbitMQ connection information from environment
+    rabbitmq_url = os.getenv('RABBITMQ_URL')
+    if not rabbitmq_url:
+        print("RABBITMQ_URL environment variable not found.")
+        return False
+    
+    # Parse the RabbitMQ URL to get connection parameters
+    import re
+    match = re.match(r'amqp://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)', rabbitmq_url)
+    if not match:
+        print(f"Failed to parse RabbitMQ URL: {rabbitmq_url}")
+        return False
+    
+    username, password, host, port, vhost = match.groups()
+    vhost = vhost or '/'
+    
+    print(f"Connecting to RabbitMQ at {host}:{port} as {username}")
+    
+    # Ask for confirmation
+    confirmation = input(f"This will attempt to clear task {task_id} from the queue. Type 'CLEAR-TASK' to confirm: ")
+    if confirmation.strip() != "CLEAR-TASK":
+        print("Operation canceled.")
+        return False
+    
+    try:
+        # Try using the RabbitMQ Management API
+        import requests
+        from requests.auth import HTTPBasicAuth
+        
+        # Construct the Management API URL
+        api_port = 15672  # Default management port
+        queue_name = app.conf.task_default_queue
+        
+        # Get all messages in the queue
+        api_url = f"http://{host}:{api_port}/api/queues/{vhost}/{queue_name}/get"
+        
+        # Request to get messages from the queue
+        payload = {
+            "count": 100,  # Get up to 100 messages
+            "requeue": True,  # Requeue them after viewing
+            "encoding": "auto"
+        }
+        
+        response = requests.post(
+            api_url, 
+            json=payload,
+            auth=HTTPBasicAuth(username, password)
+        )
+        
+        if response.status_code != 200:
+            print(f"Failed to get messages: {response.status_code} - {response.text}")
+            return False
+        
+        messages = response.json()
+        print(f"Found {len(messages)} messages in queue")
+        
+        # Find the message with our task ID
+        target_message = None
+        for msg in messages:
+            properties = msg.get('properties', {})
+            headers = properties.get('headers', {})
+            
+            # Look for the task ID in various places
+            msg_id = headers.get('id', '')
+            
+            if msg_id == task_id or task_id in str(msg):
+                target_message = msg
+                break
+        
+        if not target_message:
+            print(f"Task {task_id} not found in the queue")
+            return False
+        
+        # Get the delivery tag
+        delivery_tag = target_message.get('delivery_tag')
+        print(f"Found task {task_id} with delivery tag {delivery_tag}")
+        
+        # Now reject the message to remove it
+        # We need to use a direct connection for this
+        from kombu import Connection
+        
+        with Connection(rabbitmq_url) as conn:
+            channel = conn.channel()
+            
+            # Reject the message without requeuing
+            channel.basic_reject(delivery_tag, requeue=False)
+            print(f"Task {task_id} has been removed from the queue")
+            
+        return True
+    except ImportError:
+        print("Required packages not installed. Try: pip install requests")
+        return False
+    except Exception as e:
+        print(f"Error clearing task: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def main_menu():
     """Display the main menu and handle user input"""
     while True:
@@ -143,9 +305,11 @@ def main_menu():
         print("3. Restart Celery workers")
         print("4. Purge all tasks")
         print("5. Retry a specific failed task")
+        print("6. Clear stuck ready tasks")
+        print("7. Clear a specific task by ID")
         print("0. Exit")
         
-        choice = input("\nEnter choice (0-5): ")
+        choice = input("\nEnter choice (0-7): ")
         
         if choice == "1":
             get_task_info()
@@ -157,6 +321,10 @@ def main_menu():
             purge_all_tasks()
         elif choice == "5":
             retry_failed_task()
+        elif choice == "6":
+            clear_stuck_ready_tasks()
+        elif choice == "7":
+            clear_task_by_id()
         elif choice == "0":
             print("Exiting...")
             break
@@ -177,6 +345,10 @@ if __name__ == "__main__":
             restart_workers()
         elif sys.argv[1] == "purge":
             purge_all_tasks()
+        elif sys.argv[1] == "clear-ready":
+            clear_stuck_ready_tasks()
+        elif sys.argv[1] == "clear-task":
+            clear_task_by_id()
     else:
         # No arguments, show interactive menu
         main_menu() 

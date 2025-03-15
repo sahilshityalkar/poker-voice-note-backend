@@ -34,12 +34,21 @@ app.conf.update(
     broker_connection_retry_on_startup=True,
     task_track_started=True,  # Track when tasks are started
     task_time_limit=3600,     # 1 hour time limit per task
-    task_acks_late=True,      # Acknowledge tasks only after processing completes successfully
+    task_acks_late=False,     # Acknowledge tasks immediately (we'll acknowledge explicitly in task)
     broker_transport_options={
-        'confirm_publish': True,  # Ensure publisher confirms
-        'visibility_timeout': 3600,  # 1 hour - how long before a task is redelivered if not acknowledged
+        'confirm_publish': True,      # Ensure publisher confirms
+        'visibility_timeout': 1209600,  # 14 days - how long before a task is redelivered if not acknowledged
+        # RabbitMQ specific settings for durability
+        'queue_ha_policy': 'all',    # High availability queue policy
+        'delivery_mode': 2,          # Make messages persistent (saved to disk)
     },
-    worker_prefetch_multiplier=1,  # Lower prefetch count
+    # Acknowledgment settings to prevent phantom tasks
+    broker_connection_max_retries=10,  # Maximum connection retries
+    broker_connection_timeout=30,    # Connection timeout
+    broker_pool_limit=10,            # Connection pool size
+    broker_heartbeat=10,             # Heartbeat interval (seconds)
+    task_send_sent_event=True,       # Send task-sent events to monitor task flow
+    worker_prefetch_multiplier=1,    # Lower prefetch count
     
     # Task acknowledgment settings
     worker_cancel_long_running_tasks_on_connection_loss=True,  # Cancel tasks if connection lost

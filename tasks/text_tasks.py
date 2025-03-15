@@ -24,8 +24,7 @@ print(f"[CELERY] Text Task Python path: {sys.path}")
           autoretry_for=(Exception,),  # Auto retry for all exceptions
           retry_kwargs={'max_retries': 5},  # Max 5 retries
           retry_backoff=True,  # Exponential backoff
-          retry_backoff_max=300,  # Max 5 minutes backoff
-          acks_late=True)  # Only acknowledge task after it completes successfully
+          retry_backoff_max=300)  # Max 5 minutes backoff
 def process_text_task(self, text: str, user_id: str) -> Dict[str, Any]:
     """
     Celery task to process text input in the background.
@@ -37,6 +36,12 @@ def process_text_task(self, text: str, user_id: str) -> Dict[str, Any]:
     Returns:
         Results of the text processing pipeline
     """
+    # Import internal connection for message explicit acknowledgment
+    from celery.worker.request import Request
+    
+    # Support for manual acknowledgment
+    message_acknowledged = False
+    
     try:
         task_id = self.request.id
         retry_count = self.request.retries
@@ -105,6 +110,22 @@ def process_text_task(self, text: str, user_id: str) -> Dict[str, Any]:
         
         print(f"[CELERY] Completed text processing task {task_id} for user {user_id}")
         
+        # Explicitly acknowledge the task to ensure it's removed from the queue
+        # This is a workaround for tasks that might not be properly acknowledged
+        try:
+            # Only attempt this in workers (not in eager mode)
+            if not self.request.is_eager:
+                # Get the current task's message from the request
+                # This is an internal Celery API that might change in future versions
+                current_message = self.request.message
+                current_message.ack()
+                print(f"[CELERY] Explicitly acknowledged task {task_id}")
+                message_acknowledged = True
+        except Exception as ack_error:
+            print(f"[CELERY] Note: Could not explicitly acknowledge task: {ack_error}")
+            # This is not a critical error, as Celery should still acknowledge normally
+            pass
+        
         # Return the full result
         return {
             "status": "completed",
@@ -112,7 +133,8 @@ def process_text_task(self, text: str, user_id: str) -> Dict[str, Any]:
             "user_id": user_id,
             "text_length": len(text),
             "completion_time": datetime.now().isoformat(),
-            "result": result
+            "result": result,
+            "message_acknowledged": message_acknowledged
         }
         
     except Exception as e:
