@@ -38,4 +38,5 @@ app.conf.update(
 print(f"[CELERY] Python path: {sys.path}")
 print(f"[CELERY] Project path: {project_path}")
 print(f"[CELERY] Imported packages: {app.conf.imports}")
+print(f"[CELERY] Connecting to broker URL: {app.conf.broker_url}")
 
